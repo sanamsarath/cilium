@@ -2,7 +2,20 @@
 
 ## Overview
 
-This design document outlines the necessary changes to the Cilium agent to support centralized policy resolution. Currently, each Cilium agent (running as a DaemonSet) independently watches policy events, computes the mapping between rules and affected identities, and applies these policies. This redundant computation across all agents causes significant resource overhead and increased load on the Kubernetes API server, especially in large clusters.
+This design document outlines the necessary changes to the Cilium agent to support centralized policy resolution. Currently, each Cilium agent (running as    // For CiliumResolvedPolicy
+    crpSyncPending       atomic.Int32
+    ciliumResolvedPolicies resource.Resource[*cilium_v2alpha1.CiliumResolvedPolicy]DaemonSet) i    i := &policyImporter{
+        log:          cfg.Log,
+        repo:         cfg.Repo,
+        epm:          cfg.EndpointManager,
+        ipc:          cfg.IPCache,
+        monitorAgent: cfg.MonitorAgent,
+        
+        resolvedPolicyQ: make(chan *cilium_v2alpha1.CiliumResolvedPolicy, cfg.Config.PolicyQueueSize),
+        q:               make(chan *policytypes.PolicyUpdate, cfg.Config.PolicyQueueSize),
+        
+        prefixesByResource: map[ipcachetypes.ResourceID][]netip.Prefix{},
+    }ndently watches policy events, computes the mapping between rules and affected identities, and applies these policies. This redundant computation across all agents causes significant resource overhead and increased load on the Kubernetes API server, especially in large clusters.
 
 The centralized policy resolution approach aims to:
 1. Reduce redundant policy computation
@@ -25,30 +38,54 @@ The key bottleneck is that the mapping of rules to identities happens independen
 
 ### New CRD: CiliumResolvedPolicy
 
-We will introduce a new CRD called `CiliumResolvedPolicy` that will contain pre-computed mappings between rules and identities:
+We will introduce a new CRD called `CiliumResolvedPolicy` that will contain pre-computed mappings between rules and identities. This resource is cluster-scoped and contains:
+
+1. A reference to the original policy (CNP, CCNP, or KNP)
+2. The original rule from the source policy
+3. Pre-computed mappings between endpoint selectors and the numeric identities they match
+4. Separate mappings for ingress and egress rule selectors
+
+The structure of the CiliumResolvedPolicy allows agents to efficiently apply policies without having to compute identity-selector mappings themselves:
 
 ```yaml
-apiVersion: cilium.io/v1alpha1
+apiVersion: cilium.io/v2alpha1
 kind: CiliumResolvedPolicy
 metadata:
   name: resolved-policy-{hash}
 spec:
-  policyRevision: 123
-  rules:
-    - selector: ...
-      affectedIdentities: [1234, 5678, ...]
-      ingress: ...
-      egress: ...
-      cidrPrefixes: [...]
-    - selector: ...
-      affectedIdentities: [91011, 121314, ...]
-      ingress: ...
-      egress: ...
-  sourceRef:
-    kind: CiliumNetworkPolicy
-    name: original-policy
+  policyRef:
+    name: example-policy
     namespace: default
+    type: CNP
+    uid: "abcd1234-5678-90ab-cdef-1234567890ab"
     resourceVersion: "12345"
+  ruleSelector:
+    selector:
+      matchLabels:
+        app: myapp
+    identities: [1234, 5678]
+  ingressRuleSelectors:
+    - selector:
+        matchLabels:
+          role: frontend
+      identities: [1234, 5678]
+  egressRuleSelectors:
+    - selector:
+        matchLabels:
+          role: database
+      identities: [9012]
+  rule:
+    endpointSelector:
+      matchLabels:
+        app: myapp
+    ingress:
+      - fromEndpoints:
+          - matchLabels:
+              role: frontend
+    egress:
+      - toEndpoints:
+          - matchLabels:
+              role: database
 status:
   processed: true
   processingTime: "2025-04-27T12:00:00Z"
@@ -110,12 +147,12 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
     })
 
     // Register watchers based on the centralized policy resolution mode
-    if params.Config.CentralizedPolicyResolution {
+    if params.Config.EnableCentralizedNetworkPolicy {
         // When centralized mode is enabled, we ONLY watch for resolved policies
         // and disable ALL other policy watchers to reduce load on the API server
-        p.resolvedPolicySyncPending.Store(1)
-        p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumResolvedPolicyV1Alpha1, func() bool {
-            return p.resolvedPolicySyncPending.Load() == 0
+        p.crpSyncPending.Store(1)
+        p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumResolvedPolicyV2Alpha1, func() bool {
+            return p.crpSyncPending.Load() == 0
         })
         
         // CIDR Groups are not needed in centralized mode because the resolved policies 
@@ -161,7 +198,7 @@ const (
     k8sAPIGroupCiliumNetworkPolicyV2            = "cilium/v2::CiliumNetworkPolicy"
     k8sAPIGroupCiliumClusterwideNetworkPolicyV2 = "cilium/v2::CiliumClusterwideNetworkPolicy"
     k8sAPIGroupCiliumCIDRGroupV2Alpha1          = "cilium/v2alpha1::CiliumCIDRGroup"
-    k8sAPIGroupCiliumResolvedPolicyV1Alpha1     = "cilium/v1alpha1::CiliumResolvedPolicy" // New API group
+    k8sAPIGroupCiliumResolvedPolicyV2Alpha1     = "cilium/v2alpha1::CiliumResolvedPolicy" // New API group
 )
 ```
 
@@ -189,7 +226,7 @@ type PolicyWatcherParams struct {
     CiliumNetworkPolicies            resource.Resource[*cilium_v2.CiliumNetworkPolicy]
     CiliumClusterwideNetworkPolicies resource.Resource[*cilium_v2.CiliumClusterwideNetworkPolicy]
     CiliumCIDRGroups                 resource.Resource[*cilium_v2_alpha1.CiliumCIDRGroup]
-    CiliumResolvedPolicies           resource.Resource[*cilium_v1alpha1.CiliumResolvedPolicy] // New resource
+    CiliumResolvedPolicies           resource.Resource[*cilium_v2_alpha1.CiliumResolvedPolicy] // New resource
     NetworkPolicies                  resource.Resource[*slim_networking_v1.NetworkPolicy]
 
     MetricsManager CNPMetrics
@@ -206,7 +243,7 @@ type policyWatcher struct {
     
     // For CiliumResolvedPolicy
     resolvedPolicySyncPending atomic.Int32
-    ciliumResolvedPolicies    resource.Resource[*cilium_v1alpha1.CiliumResolvedPolicy]
+    ciliumResolvedPolicies    resource.Resource[*cilium_v2_alpha1.CiliumResolvedPolicy]
     
     // ...existing code...
 }
@@ -220,19 +257,19 @@ The PolicyImporter interface needs to be extended to support resolved policies:
 // In pkg/policy/cell/policy_importer.go
 type PolicyImporter interface {
     UpdatePolicy(*policytypes.PolicyUpdate)
-    UpdateResolvedPolicy(*ciliumv1alpha1.CiliumResolvedPolicy) error
+    UpdateResolvedPolicy(*cilium_v2alpha1.CiliumResolvedPolicy) error
 }
 
 type policyImporter struct {
     // ...existing code...
-    resolvedPolicyQ chan *ciliumv1alpha1.CiliumResolvedPolicy  // New channel for resolved policies
+    resolvedPolicyQ chan *cilium_v2alpha1.CiliumResolvedPolicy  // New channel for resolved policies
     // ...existing code...
 }
 
 func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
     i := &policyImporter{
         // ...existing code...
-        resolvedPolicyQ: make(chan *ciliumv1alpha1.CiliumResolvedPolicy, cfg.Config.PolicyQueueSize),
+        resolvedPolicyQ: make(chan *cilium_v2alpha1.CiliumResolvedPolicy, cfg.Config.PolicyQueueSize),
         // ...existing code...
     }
 
@@ -255,12 +292,12 @@ func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
     return i
 }
 
-func concatResolved(buf []*ciliumv1alpha1.CiliumResolvedPolicy, in *ciliumv1alpha1.CiliumResolvedPolicy) []*ciliumv1alpha1.CiliumResolvedPolicy {
+func concatResolved(buf []*cilium_v2alpha1.CiliumResolvedPolicy, in *cilium_v2alpha1.CiliumResolvedPolicy) []*cilium_v2alpha1.CiliumResolvedPolicy {
     buf = append(buf, in)
     return buf
 }
 
-func (i *policyImporter) UpdateResolvedPolicy(resolvedPolicy *ciliumv1alpha1.CiliumResolvedPolicy) error {
+func (i *policyImporter) UpdateResolvedPolicy(resolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy) error {
     // Queue the resolved policy update for processing
     i.resolvedPolicyQ <- resolvedPolicy
     return nil
@@ -268,7 +305,7 @@ func (i *policyImporter) UpdateResolvedPolicy(resolvedPolicy *ciliumv1alpha1.Cil
 
 // processResolvedPolicyUpdates is similar to processUpdates but handles resolved policies
 // with pre-computed identity mappings
-func (i *policyImporter) processResolvedPolicyUpdates(ctx context.Context, updates []*ciliumv1alpha1.CiliumResolvedPolicy) error {
+func (i *policyImporter) processResolvedPolicyUpdates(ctx context.Context, updates []*cilium_v2alpha1.CiliumResolvedPolicy) error {
     if len(updates) == 0 {
         return nil
     }
@@ -330,37 +367,28 @@ The PolicyRepository interface needs a new method to directly import resolved po
 // In pkg/policy/repository.go
 type Repository Struct {
     // ...existing code...
-    ImportResolvedPolicy(resolvedPolicy *ciliumv1alpha1.CiliumResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64, error)
+    ImportResolvedPolicy(resolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64, error)
     // ...existing code...
 }
 
 // This is similar to ReplaceByResourceID function in the existing repository used for updating normal policies.
-func (p *policyRepository) ImportResolvedPolicy(resolvedPolicy *ciliumv1alpha1.CiliumResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64, error) {
+func (p *policyRepository) ImportResolvedPolicy(resolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64, error) {
     p.Mutex.Lock()
     defer p.Mutex.Unlock()
     
     identities := &set.Set[identity.NumericIdentity]{}
-            resourceID := ipcachetypes.NewResourceID(
-            ipcachetypes.ResourceKindCiliumNetworkPolicy,
-            resolvedPolicy.Spec.SourceRef.Namespace,
-            resolvedPolicy.Spec.SourceRef.Name,
-        )
-if resolvedPolicy == nil || len(resolvedPolicy.Spec.Rules) == 0 {
+    resourceID := ipcachetypes.NewResourceID(
+        getResourceKindFromPolicyType(resolvedPolicy.Spec.PolicyRef.Type),
+        resolvedPolicy.Spec.PolicyRef.Namespace,
+        resolvedPolicy.Spec.PolicyRef.Name,
+    )
+if resolvedPolicy == nil || resolvedPolicy.Spec.Rule == nil {
         // This is a delete operation
         
-        // Remove the rulesif resolvedPolicy == nil || len(resolvedPolicy.Spec.Rules) == 0 {
-        // This is a delete operation
-associated with this resource
-if resolvedPolicy == nil || len(resolvedPolicy.Spec.Rules) == 0 {
-        // This is a delete operation
-        for _, rulesBySource := rangif resolvedPolicy == nil || len(resolvedPolicy.Spec.Rules) == 0 {
-        // This is a delete operation
-e p.rules {
-            if rrulerangif resolvedPolicy == nil || len(resolvedPolicy.Spec.Rules) == 0 {
-        // This is a delete operation
-e := rulesBySource[resouif rrulerangif resolvedPolicy == nil || len(resolvedPolicy.Spec.Rules) == 0 {
-// This is a delete operation
-e                                for _, r := range rrules {
+        // Remove the rules associated with this resource
+        for _, rulesBySource := range p.rules {
+            if rrules := rulesBySource[resourceID]; rrules != nil {
+                for _, r := range rrules {
                     // Add affected identities to the regeneration set
                     identities.Merge(*r.GetAffectedIdentities())
                 }
@@ -373,15 +401,88 @@ e                                for _, r := range rrules {
     }
     
     // This is an add/update operation
-    // ReplaceByResourceID creates new policy.rule by calling p.newRule(*api.Rule, ruleKey)
-    // newRule will internally create identitySelector object, run the compute to match policy 
-    // to matching identities and the list of identities will be added to the identitySelector.
-    // new policy.Rule will be added to the rules, rulesByNamespace and rulesByResource maps.
+    // Unlike ReplaceByResourceID, we already have pre-computed identities for each selector
+    // We will:
+    // 1. Create a Rule based on resolvedPolicy.Spec.Rule
+    // 2. Override the selector cache results with pre-computed identities from rule/ingress/egress selectors
+    // 3. Add the Rule to PolicyRepository using p.insert(rule)
     
-    // We can directlry create identitySelector object and add it to the selectorCache
-    // and then add the rule to the rules map using p.insert(newRule) 
+    // Create rule from the source Rule specification
+    rule := p.newRule(resolvedPolicy.Spec.Rule, resourceID)
+    
+    // Apply the pre-computed selectors for rule, ingress, and egress
+    // This is where we avoid re-computing identities
+    if resolvedPolicy.Spec.RuleSelector != nil && rule.EndpointSelector.Selector != nil {
+        // Apply pre-computed endpoint selector identities
+        p.overrideIdentitiesForSelector(rule.EndpointSelector, resolvedPolicy.Spec.RuleSelector.Identities)
+    }
+    
+    // Apply ingress rule selectors
+    for i, ingressSelector := range resolvedPolicy.Spec.IngressRuleSelectors {
+        if i < len(rule.Ingress) && ingressSelector.Selector != nil {
+            // Apply pre-computed ingress identities
+            p.overrideIdentitiesForIngressRule(&rule.Ingress[i], ingressSelector.Identities)
+        }
+    }
+    
+    // Apply egress rule selectors
+    for i, egressSelector := range resolvedPolicy.Spec.EgressRuleSelectors {
+        if i < len(rule.Egress) && egressSelector.Selector != nil {
+            // Apply pre-computed egress identities
+            p.overrideIdentitiesForEgressRule(&rule.Egress[i], egressSelector.Identities)
+        }
+    }
+    
+    // Add rule to repository
+    p.insert(rule)
+    
+    // Collect all affected identities to return
+    for _, identity := range rule.getAffectedIdentities().AsSlice() {
+        identities.Insert(identity)
+    }
     
     return identities, p.revision, nil
+}
+```
+
+Helper function to convert policy type to resource kind:
+
+```go
+// Helper function to convert policy type to resource kind
+func getResourceKindFromPolicyType(policyType string) ipcachetypes.ResourceKind {
+    switch policyType {
+    case "CNP":
+        return ipcachetypes.ResourceKindCiliumNetworkPolicy
+    case "CCNP":
+        return ipcachetypes.ResourceKindCiliumClusterwideNetworkPolicy
+    case "KNP":
+        return ipcachetypes.ResourceKindNetworkPolicy
+    default:
+        return ipcachetypes.ResourceKindUnknown
+    }
+}
+
+// Helper functions for applying pre-computed identities to rules
+func (p *policyRepository) overrideIdentitiesForSelector(selector api.EndpointSelector, identities []identity.NumericIdentity) {
+    // Inject pre-computed identities directly into the selector's cache
+    // This avoids the need for the agent to compute identity mappings itself
+    p.selectorCache.UpdateIdentities(selector, identities, nil)
+}
+
+func (p *policyRepository) overrideIdentitiesForIngressRule(rule *api.IngressRule, identities []identity.NumericIdentity) {
+    // Apply pre-computed identities for ingress rule selectors
+    for _, fromEndpoint := range rule.FromEndpoints {
+        p.selectorCache.UpdateIdentities(fromEndpoint, identities, nil)
+    }
+    // Similar overrides would be needed for CIDR, entities, etc.
+}
+
+func (p *policyRepository) overrideIdentitiesForEgressRule(rule *api.EgressRule, identities []identity.NumericIdentity) {
+    // Apply pre-computed identities for egress rule selectors
+    for _, toEndpoint := range rule.ToEndpoints {
+        p.selectorCache.UpdateIdentities(toEndpoint, identities, nil)
+    }
+    // Similar overrides would be needed for CIDR, entities, etc.
 }
 ```
 
@@ -440,13 +541,50 @@ e                                for _, r := range rrules {
 
 ## Implementation steps
 
-1. Implement core changes to PolicyWatcher, PolicyImporter, and PolicyRepository
-2. Implement support for handling resolved policies in endpoint regeneration
-3. Implement metrics and observability for the new policy resolution path
-4. Implement seamless switching between centralized and distributed policy resolution
-5. Test and validate the new architecture in a staging environment
-6. Optimize policy repository with data structures more light weight and efficient for the centralized mode.
+1. Implement core changes to PolicyWatcher
+   - Add support for CiliumResolvedPolicy resource watching
+   - Modify configuration to conditionally watch policies based on EnableCentralizedNetworkPolicy flag
+
+2. Extend PolicyImporter with resolved policy support
+   - Implement UpdateResolvedPolicy method
+   - Add queue and processing function for resolved policies
+   - Handle pre-computed identity mappings from the selectors
+
+3. Update PolicyRepository
+   - Add ImportResolvedPolicy method to directly apply pre-computed policy rules with their identity mappings
+   - Create utility functions to override identity mappings in the selector cache
+   - Ensure proper rule insertion and deletion with pre-computed identity information
+
+4. Update Endpoint Regeneration Flow
+   - Ensure endpoint regeneration works properly with pre-computed policy mappings
+   - Test regeneration efficiency compared to distributed policy computation
+
+5. Implement Metrics and Observability
+   - Track policy implementation time and success rate
+   - Add metrics for comparing centralized vs. distributed policy performance
+   - Add debugging capabilities for troubleshooting policy issues
+
+6. Documentation and Testing
+   - Update documentation and user guides
+   - Add integration tests to verify both modes work correctly
+   - Implement migration testing for switching between modes
+
+7. Optimize Policy Repository
+   - Refine data structures for more efficient storage of pre-computed policies
+   - Optimize lookup paths for improved performance in centralized mode
 
 ## Note on Centralized Identity Allocation
 
 Beta version changes for centralized identity allocation are already supported. This functionality complements the centralized policy resolution approach and the code interactions will need to be understood in a subsequent phase.
+
+## Conclusion
+
+The centralized policy computation architecture offers significant advantages for large Kubernetes clusters running Cilium:
+
+1. **Reduced Redundancy**: Policy computation happens once instead of being repeated on every agent
+2. **Lower API Server Load**: Fewer policy watches reduce API server resource usage
+3. **Improved Scalability**: Agents in large clusters operate more efficiently with pre-computed policies
+4. **Reduced Resource Usage**: Agents require less CPU and memory when not computing policies themselves
+5. **Consistent Policy Application**: Centralized computation ensures all agents get identical policy results
+
+These benefits make the centralized policy approach especially valuable for large-scale deployments where policy computation represents a significant portion of agent overhead.
