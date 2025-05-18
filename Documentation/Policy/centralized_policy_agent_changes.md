@@ -324,9 +324,8 @@ func (i *policyImporter) processResolvedPolicyUpdates(ctx context.Context, updat
     
     for _, resolvedPolicy := range updates {
         // For resolved policies, we use ImportResolvedPolicy on the repository
-        // which will take the pre-computed identity mappings. Even though affected
-        // identities are already computed, we still fetch them from ImportResolvedPolicy
-        // which is expected to add the old identities deleted no longer related to the policy.
+        // which will handle the pre-computed identity mappings from the CiliumResolvedPolicy
+        // and return the affected identities that need regeneration
         affectedIdentities, newRevision, err := i.repo.ImportResolvedPolicy(resolvedPolicy)
         if err != nil {
             i.log.Error("Failed to import resolved policy",
@@ -373,117 +372,51 @@ type Repository Struct {
 
 // This is similar to ReplaceByResourceID function in the existing repository used for updating normal policies.
 func (p *policyRepository) ImportResolvedPolicy(resolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64, error) {
-    p.Mutex.Lock()
-    defer p.Mutex.Unlock()
+    // TODO: Implement this method with the following steps:
     
-    identities := &set.Set[identity.NumericIdentity]{}
-    resourceID := ipcachetypes.NewResourceID(
-        getResourceKindFromPolicyType(resolvedPolicy.Spec.PolicyRef.Type),
-        resolvedPolicy.Spec.PolicyRef.Namespace,
-        resolvedPolicy.Spec.PolicyRef.Name,
-    )
-if resolvedPolicy == nil || resolvedPolicy.Spec.Rule == nil {
-        // This is a delete operation
-        
-        // Remove the rules associated with this resource
-        for _, rulesBySource := range p.rules {
-            if rrules := rulesBySource[resourceID]; rrules != nil {
-                for _, r := range rrules {
-                    // Add affected identities to the regeneration set
-                    identities.Merge(*r.GetAffectedIdentities())
-                }
-                delete(rulesBySource, resourceID)
-            }
-        }
-        
-        p.revision++
-        return identities, p.revision, nil
-    }
+    // 1. Lock the repository mutex
     
-    // This is an add/update operation
-    // Unlike ReplaceByResourceID, we already have pre-computed identities for each selector
-    // We will:
-    // 1. Create a Rule based on resolvedPolicy.Spec.Rule
-    // 2. Override the selector cache results with pre-computed identities from rule/ingress/egress selectors
-    // 3. Add the Rule to PolicyRepository using p.insert(rule)
+    // 2. Create a set to collect affected identities
     
-    // Create rule from the source Rule specification
-    rule := p.newRule(resolvedPolicy.Spec.Rule, resourceID)
+    // 3. Construct a resourceID from the PolicyRef information
     
-    // Apply the pre-computed selectors for rule, ingress, and egress
-    // This is where we avoid re-computing identities
-    if resolvedPolicy.Spec.RuleSelector != nil && rule.EndpointSelector.Selector != nil {
-        // Apply pre-computed endpoint selector identities
-        p.overrideIdentitiesForSelector(rule.EndpointSelector, resolvedPolicy.Spec.RuleSelector.Identities)
-    }
+    // 4. If this is a delete operation (resolvedPolicy is nil or has no rule):
+    //    a. Find and remove rules associated with this resource
+    //    b. Collect affected identities from the removed rules
+    //    c. Update repository revision number
+    //    d. Return affected identities and revision
     
-    // Apply ingress rule selectors
-    for i, ingressSelector := range resolvedPolicy.Spec.IngressRuleSelectors {
-        if i < len(rule.Ingress) && ingressSelector.Selector != nil {
-            // Apply pre-computed ingress identities
-            p.overrideIdentitiesForIngressRule(&rule.Ingress[i], ingressSelector.Identities)
-        }
-    }
+    // 5. For add/update operations:
+    //    a. Create a Rule instance based on resolvedPolicy.Spec.Rule
+    //    b. Use the pre-computed identities from resolvedPolicy instead of calculating them:
+    //       - For endpoint selector (resolvedPolicy.Spec.RuleSelector)
+    //       - For ingress rules (resolvedPolicy.Spec.IngressRuleSelectors)
+    //       - For egress rules (resolvedPolicy.Spec.EgressRuleSelectors)
+    //    c. Insert the rule into the repository
+    //    d. Collect all affected identities
+    //    e. Update repository revision number
+    //    f. Return affected identities and revision
     
-    // Apply egress rule selectors
-    for i, egressSelector := range resolvedPolicy.Spec.EgressRuleSelectors {
-        if i < len(rule.Egress) && egressSelector.Selector != nil {
-            // Apply pre-computed egress identities
-            p.overrideIdentitiesForEgressRule(&rule.Egress[i], egressSelector.Identities)
-        }
-    }
-    
-    // Add rule to repository
-    p.insert(rule)
-    
-    // Collect all affected identities to return
-    for _, identity := range rule.getAffectedIdentities().AsSlice() {
-        identities.Insert(identity)
-    }
-    
-    return identities, p.revision, nil
+    // Placeholder implementation
+    return &set.Set[identity.NumericIdentity]{}, p.revision, nil
 }
 ```
 
 Helper function to convert policy type to resource kind:
 
 ```go
-// Helper function to convert policy type to resource kind
-func getResourceKindFromPolicyType(policyType string) ipcachetypes.ResourceKind {
-    switch policyType {
-    case "CNP":
-        return ipcachetypes.ResourceKindCiliumNetworkPolicy
-    case "CCNP":
-        return ipcachetypes.ResourceKindCiliumClusterwideNetworkPolicy
-    case "KNP":
-        return ipcachetypes.ResourceKindNetworkPolicy
-    default:
-        return ipcachetypes.ResourceKindUnknown
-    }
-}
+// TODO: Helper functions needed for implementation:
 
-// Helper functions for applying pre-computed identities to rules
-func (p *policyRepository) overrideIdentitiesForSelector(selector api.EndpointSelector, identities []identity.NumericIdentity) {
-    // Inject pre-computed identities directly into the selector's cache
-    // This avoids the need for the agent to compute identity mappings itself
-    p.selectorCache.UpdateIdentities(selector, identities, nil)
-}
+// 1. A function to convert policy type to resource kind:
+//    - Convert CNP to ResourceKindCiliumNetworkPolicy
+//    - Convert CCNP to ResourceKindCiliumClusterwideNetworkPolicy
+//    - Convert KNP to ResourceKindNetworkPolicy
 
-func (p *policyRepository) overrideIdentitiesForIngressRule(rule *api.IngressRule, identities []identity.NumericIdentity) {
-    // Apply pre-computed identities for ingress rule selectors
-    for _, fromEndpoint := range rule.FromEndpoints {
-        p.selectorCache.UpdateIdentities(fromEndpoint, identities, nil)
-    }
-    // Similar overrides would be needed for CIDR, entities, etc.
-}
-
-func (p *policyRepository) overrideIdentitiesForEgressRule(rule *api.EgressRule, identities []identity.NumericIdentity) {
-    // Apply pre-computed identities for egress rule selectors
-    for _, toEndpoint := range rule.ToEndpoints {
-        p.selectorCache.UpdateIdentities(toEndpoint, identities, nil)
-    }
-    // Similar overrides would be needed for CIDR, entities, etc.
-}
+// 2. Function(s) to apply pre-computed identities:
+//    - Apply pre-computed identities to endpoint selectors
+//    - Apply pre-computed identities to ingress rule selectors
+//    - Apply pre-computed identities to egress rule selectors
+//    - Handle special cases like CIDRs, entities, etc.
 ```
 
 ## Endpoint Regeneration Flow
