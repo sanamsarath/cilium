@@ -7,6 +7,7 @@ import (
 	"time"
 
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/labels"
 	policyapi "github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/source"
@@ -36,6 +37,10 @@ type PolicyUpdate struct {
 	// The time the policy initially began to be processed in Cilium, such as when the
 	// policy was received from the API server.
 	ProcessingStartTime time.Time
+
+	// ResolvedPolicy contains the pre-computed policy from centralized policy resolution.
+	// This is only set when using the centralized policy resolution mode.
+	ResolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy
 
 	// DoneChan, if not nil, will have a single value emitted: the revision of the
 	// policy repository when the update has been processed.

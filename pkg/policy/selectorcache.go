@@ -327,7 +327,8 @@ type identityNotifier interface {
 // AddFQDNSelector adds the given api.FQDNSelector in to the selector cache. If
 // an identical EndpointSelector has already been cached, the corresponding
 // types.CachedSelector is returned, otherwise one is created and added to the cache.
-func (sc *SelectorCache) AddFQDNSelector(user CachedSelectionUser, lbls stringLabels, fqdnSelec api.FQDNSelector) (cachedSelector types.CachedSelector, added bool) {
+// If precomputedIdentities is non-empty, they will be used instead of scanning idCache.
+func (sc *SelectorCache) AddFQDNSelector(user CachedSelectionUser, lbls stringLabels, fqdnSelec api.FQDNSelector, precomputedIdentities ...identity.NumericIdentity) (cachedSelector types.CachedSelector, added bool) {
 	key := fqdnSelec.String()
 
 	sc.mutex.Lock()
@@ -346,11 +347,11 @@ func (sc *SelectorCache) AddFQDNSelector(user CachedSelectionUser, lbls stringLa
 	// Make the FQDN subsystem aware of this selector
 	sc.localIdentityNotifier.RegisterFQDNSelector(source.selector)
 
-	return sc.addSelectorLocked(user, lbls, key, source)
+	return sc.addSelectorLocked(user, lbls, key, source, precomputedIdentities...)
 }
 
 // must hold lock for writing
-func (sc *SelectorCache) addSelectorLocked(user CachedSelectionUser, lbls stringLabels, key string, source selectorSource) (types.CachedSelector, bool) {
+func (sc *SelectorCache) addSelectorLocked(user CachedSelectionUser, lbls stringLabels, key string, source selectorSource, precomputedIdentities ...identity.NumericIdentity) (types.CachedSelector, bool) {
 	idSel := &identitySelector{
 		logger:           sc.logger,
 		key:              key,
@@ -362,10 +363,19 @@ func (sc *SelectorCache) addSelectorLocked(user CachedSelectionUser, lbls string
 
 	sc.selectors[key] = idSel
 
-	// Scan the cached set of IDs to determine any new matchers
-	for nid, identity := range sc.idCache {
-		if idSel.source.matches(identity) {
+	if len(precomputedIdentities) > 0 {
+		// Use precomputed identities if provided and skip checking the idCache
+		// This optimization allows callers to pass pre-matched identities
+		// to avoid the potentially expensive scanning of all identities in idCache
+		for _, nid := range precomputedIdentities {
 			idSel.cachedSelections[nid] = struct{}{}
+		}
+	} else {
+		// Scan the cached set of IDs to determine any new matchers
+		for nid, identity := range sc.idCache {
+			if idSel.source.matches(identity) {
+				idSel.cachedSelections[nid] = struct{}{}
+			}
 		}
 	}
 
@@ -399,7 +409,8 @@ func (sc *SelectorCache) FindCachedIdentitySelector(selector api.EndpointSelecto
 // selector cache. If an identical EndpointSelector has already been
 // cached, the corresponding types.CachedSelector is returned, otherwise one
 // is created and added to the cache.
-func (sc *SelectorCache) AddIdentitySelector(user types.CachedSelectionUser, lbls stringLabels, selector api.EndpointSelector) (cachedSelector types.CachedSelector, added bool) {
+// If precomputedIdentities is non-empty, they will be used instead of scanning idCache.
+func (sc *SelectorCache) AddIdentitySelector(user types.CachedSelectionUser, lbls stringLabels, selector api.EndpointSelector, precomputedIdentities ...identity.NumericIdentity) (cachedSelector types.CachedSelector, added bool) {
 	// The key returned here may be different for equivalent
 	// labelselectors, if the selector's requirements are stored
 	// in different orders. When this happens we'll be tracking
@@ -422,7 +433,7 @@ func (sc *SelectorCache) AddIdentitySelector(user types.CachedSelectionUser, lbl
 		source.namespaces = namespaces
 	}
 
-	return sc.addSelectorLocked(user, lbls, key, source)
+	return sc.addSelectorLocked(user, lbls, key, source, precomputedIdentities...)
 }
 
 // lock must be held

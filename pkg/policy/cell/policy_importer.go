@@ -31,6 +31,15 @@ import (
 	"github.com/cilium/cilium/pkg/time"
 )
 
+// PolicyImporter is the interface for importing policies into the policy repository.
+// It supports two types of policy updates:
+//
+//  1. Traditional policy updates with rules that need to be processed and resolved
+//     to determine affected identities
+//
+//  2. Centralized policy resolution updates (CiliumResolvedPolicy) containing
+//     pre-computed identity mappings that can bypass the expensive identity resolution
+//     process
 type PolicyImporter interface {
 	UpdatePolicy(*policytypes.PolicyUpdate)
 }
@@ -60,7 +69,12 @@ type policyImporter struct {
 	// so we can allocate and release prefixes as policy changes.
 	prefixesByResource map[ipcachetypes.ResourceID][]netip.Prefix
 
+	// q is the channel for regular policy updates (rules-based)
 	q chan *policytypes.PolicyUpdate
+
+	// resolvedPolicyQ is the dedicated channel for CiliumResolvedPolicy updates
+	// which contain pre-computed identity mappings
+	resolvedPolicyQ chan *policytypes.PolicyUpdate
 }
 
 type ipcacher interface {
@@ -81,17 +95,26 @@ func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
 		ipc:          cfg.IPCache,
 		monitorAgent: cfg.MonitorAgent,
 
-		q: make(chan *policytypes.PolicyUpdate, cfg.Config.PolicyQueueSize),
+		q:               make(chan *policytypes.PolicyUpdate, cfg.Config.PolicyQueueSize),
+		resolvedPolicyQ: make(chan *policytypes.PolicyUpdate, cfg.Config.PolicyQueueSize),
 
 		prefixesByResource: map[ipcachetypes.ResourceID][]netip.Prefix{},
 	}
 
-	buf := stream.Buffer(
+	// Set up buffer and observer for regular policy updates
+	regularBuf := stream.Buffer(
 		stream.FromChannel(i.q),
 		int(cfg.Config.PolicyQueueSize), 10*time.Millisecond,
 		concat)
 
-	cfg.JobGroup.Add(job.Observer("policy-importer", i.processUpdates, buf))
+	// Set up buffer and observer for resolved policy updates
+	resolvedBuf := stream.Buffer(
+		stream.FromChannel(i.resolvedPolicyQ),
+		int(cfg.Config.PolicyQueueSize), 10*time.Millisecond,
+		concatResolved)
+
+	cfg.JobGroup.Add(job.Observer("policy-importer", i.processUpdates, regularBuf))
+	cfg.JobGroup.Add(job.Observer("resolved-policy-importer", i.processResolvedPolicyUpdates, resolvedBuf))
 
 	return i
 }
@@ -102,10 +125,22 @@ func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
 const ResourceIDAnonymous = "policy/anonymous"
 
 func (i *policyImporter) UpdatePolicy(u *policytypes.PolicyUpdate) {
+	// Route resolved policy updates to the dedicated channel
+	if u.ResolvedPolicy != nil {
+		i.resolvedPolicyQ <- u
+		return
+	}
+
+	// Route regular rule-based updates to the standard channel
 	i.q <- u
 }
 
 func concat(buf []*policytypes.PolicyUpdate, in *policytypes.PolicyUpdate) []*policytypes.PolicyUpdate {
+	buf = append(buf, in)
+	return buf
+}
+
+func concatResolved(buf []*policytypes.PolicyUpdate, in *policytypes.PolicyUpdate) []*policytypes.PolicyUpdate {
 	buf = append(buf, in)
 	return buf
 }
@@ -292,9 +327,22 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 	for _, upd := range updates {
 		var regen *set.Set[identity.NumericIdentity]
 
-		// The standard case: we have an owning resource, either a k8s object
-		// or a file on disk.
+		// For safety, handle any resolved policies that might slip through
+		if upd.ResolvedPolicy != nil {
+			i.log.Warn("Found resolved policy in regular update channel, forwarding to resolved policy queue",
+				logfields.Resource, upd.Resource,
+				logfields.Name, upd.ResolvedPolicy.Name,
+				logfields.K8sNamespace, upd.ResolvedPolicy.Namespace)
+
+			// Forward to the correct channel and skip processing here
+			i.resolvedPolicyQ <- upd
+			continue
+		}
+
+		// Process regular policy updates
 		if upd.Resource != "" {
+			// The standard case: we have an owning resource, either a k8s object
+			// or a file on disk.
 			regen, endRevision, oldRuleCnt = i.repo.ReplaceByResource(upd.Rules, upd.Resource)
 		} else {
 			// otherwise, this is a local API call, and we are replacing by labels.
@@ -396,6 +444,96 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 
 	// Remove stale prefix metadata from the ipcache.
 	i.prunePrefixes(oldPrefixes)
+	return nil
+}
+
+// processResolvedPolicyUpdates processes a batch of CiliumResolvedPolicy updates.
+// This is a dedicated optimization path for centralized policy resolution that
+// avoids the overhead of processing rules directly and uses pre-computed
+// identity mappings instead.
+// (Does not actually return error, just to satisfy the Job signature)
+func (i *policyImporter) processResolvedPolicyUpdates(ctx context.Context, updates []*policytypes.PolicyUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	i.log.Info("Processing resolved policy updates", logfields.Count, len(updates))
+
+	// Apply changes to the repository directly with pre-computed identity mappings
+	idsToRegen := &set.Set[identity.NumericIdentity]{}
+	startRevision := i.repo.GetRevision()
+	endRevision := startRevision
+
+	for _, upd := range updates {
+		// Sanity check - all updates in this channel should have ResolvedPolicy set
+		if upd.ResolvedPolicy == nil {
+			i.log.Error("Received non-resolved policy in resolved policy channel, skipping",
+				logfields.Resource, upd.Resource)
+			continue
+		}
+
+		// Import the resolved policy using the specialized method
+		i.log.Info("Importing resolved policy",
+			logfields.Resource, upd.Resource,
+			logfields.Name, upd.ResolvedPolicy.Name,
+			logfields.K8sNamespace, upd.ResolvedPolicy.Namespace)
+
+		regen, revision, err := i.repo.ImportResolvedPolicy(upd.ResolvedPolicy, upd.Resource)
+		if err != nil {
+			i.log.Error("Failed to import resolved policy",
+				logfields.Resource, upd.Resource,
+				logfields.Name, upd.ResolvedPolicy.Name,
+				logfields.K8sNamespace, upd.ResolvedPolicy.Namespace,
+				logfields.Error, err)
+			continue
+		}
+
+		endRevision = revision
+		idsToRegen.Merge(*regen)
+
+		// Report that the policy has been inserted in to the repository
+		if upd.DoneChan != nil {
+			upd.DoneChan <- endRevision
+		}
+
+		// Send a policy update notification
+		if i.monitorAgent != nil {
+			var msg monitorapi.AgentNotifyMessage
+			lbls := []string{
+				"cilium.io/resolved-policy=" + upd.ResolvedPolicy.Name,
+				"cilium.io/namespace=" + upd.ResolvedPolicy.Namespace,
+			}
+
+			if upd.ResolvedPolicy.Spec.Rule == nil {
+				// This is a delete operation (rule is nil)
+				msg = monitorapi.PolicyDeleteMessage(0, lbls, endRevision)
+			} else {
+				// This is an update operation
+				msg = monitorapi.PolicyUpdateMessage(1, lbls, endRevision)
+			}
+
+			err := i.monitorAgent.SendEvent(monitorapi.MessageTypeAgent, msg)
+			if err != nil {
+				i.log.Error("Failed to send resolved policy update as monitor notification", logfields.Error, err)
+			}
+		}
+	}
+
+	// Update the endpoints with the policy changes
+	i.log.Info("Resolved policy repository updates complete, triggering endpoint updates",
+		logfields.PolicyRevision, endRevision)
+	if i.epm != nil {
+		i.epm.UpdatePolicy(idsToRegen, startRevision, endRevision)
+	}
+
+	// Record ingestion time for metrics
+	for _, upd := range updates {
+		if upd.ProcessingStartTime.IsZero() {
+			continue
+		}
+		metrics.PolicyImplementationDelay.WithLabelValues(string(upd.Source)).Observe(time.Since(upd.ProcessingStartTime).Seconds())
+	}
+
 	return nil
 }
 

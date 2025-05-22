@@ -105,6 +105,7 @@ rules:
   - ciliumbgppeerconfigs
   - ciliumclusterwideenvoyconfigs
   - ciliumclusterwidenetworkpolicies
+  - ciliumresolvedpolicies
   - ciliumegressgatewaypolicies
   - ciliumendpoints
   - ciliumendpointslices

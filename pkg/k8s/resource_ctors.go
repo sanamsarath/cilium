@@ -178,6 +178,20 @@ func LBIPPoolsResource(params CiliumResourceParams, opts ...func(*metav1.ListOpt
 	return resource.New[*cilium_api_v2alpha1.CiliumLoadBalancerIPPool](params.Lifecycle, lw, resource.WithMetric("CiliumLoadBalancerIPPool"), resource.WithCRDSync(params.CRDSyncPromise)), nil
 }
 
+// CiliumResolvedPolicyResource builds the Resource[CiliumResolvedPolicy] object
+func CiliumResolvedPolicyResource(params CiliumResourceParams, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2alpha1.CiliumResolvedPolicy], error) {
+	if !params.ClientSet.IsEnabled() {
+		return nil, nil
+	}
+	lw := utils.ListerWatcherWithModifiers(
+		utils.ListerWatcherFromTyped[*cilium_api_v2alpha1.CiliumResolvedPolicyList](params.ClientSet.CiliumV2alpha1().CiliumResolvedPolicies()),
+		opts...,
+	)
+	return resource.New[*cilium_api_v2alpha1.CiliumResolvedPolicy](params.Lifecycle, lw,
+		resource.WithMetric("CiliumResolvedPolicy"),
+		resource.WithCRDSync(params.CRDSyncPromise)), nil
+}
+
 func CiliumIdentityResource(params CiliumResourceParams, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2.CiliumIdentity], error) {
 	if !params.ClientSet.IsEnabled() {
 		return nil, nil

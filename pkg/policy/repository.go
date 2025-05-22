@@ -5,11 +5,13 @@ package policy
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
 	"sync/atomic"
 
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	cilium "github.com/cilium/proxy/go/cilium/api"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -51,6 +53,7 @@ type PolicyRepository interface {
 	Iterate(f func(rule *api.Rule))
 	ReplaceByResource(rules api.Rules, resource ipcachetypes.ResourceID) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, oldRevCnt int)
 	ReplaceByLabels(rules api.Rules, searchLabelsList []labels.LabelArray) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, oldRevCnt int)
+	ImportResolvedPolicy(resolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy, resource ipcachetypes.ResourceID) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, err error)
 	Search(lbls labels.LabelArray) (api.Rules, uint64)
 }
 
@@ -599,4 +602,91 @@ func (p *Repository) GetPolicySnapshot() map[identity.NumericIdentity]SelectorPo
 	defer p.mutex.RUnlock()
 
 	return p.policyCache.GetPolicySnapshot()
+}
+
+// ImportResolvedPolicy imports a pre-computed CiliumResolvedPolicy into the repository.
+// It uses the pre-computed identity mappings from the resolved policy instead of
+// computing them locally.
+func (p *Repository) ImportResolvedPolicy(resolvedPolicy *cilium_v2alpha1.CiliumResolvedPolicy, resource ipcachetypes.ResourceID) (*set.Set[identity.NumericIdentity], uint64, error) {
+	if resolvedPolicy == nil {
+		return nil, 0, fmt.Errorf("nil resolved policy")
+	}
+
+	if len(resource) == 0 {
+		return nil, 0, fmt.Errorf("empty resource ID")
+	}
+
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	// Create a set to collect affected identities
+	affectedIDs := &set.Set[identity.NumericIdentity]{}
+
+	// Delete existing rules for this resource (if any)
+	oldRules := maps.Clone(p.rulesByResource[resource]) // need to clone as `p.del()` mutates this
+	for key, oldRule := range oldRules {
+		for _, subj := range oldRule.getSubjects() {
+			affectedIDs.Insert(subj)
+		}
+		p.del(key)
+	}
+
+	// If rule is nil, we're done (it was a delete operation)
+	if resolvedPolicy.Spec.Rule == nil {
+		// Release the old rules
+		for _, r := range oldRules {
+			p.releaseRule(r)
+		}
+		return affectedIDs, p.BumpRevision(), nil
+	}
+
+	// Create a new rule from the resolved policy
+	apiRule := *resolvedPolicy.Spec.Rule
+
+	// Create a new rule with the resourceID
+	newRule := &rule{
+		Rule: apiRule,
+		key:  ruleKey{resource: resource, idx: 0},
+	}
+
+	// Use pre-computed identities for the rule selector
+	ruleSelector := resolvedPolicy.Spec.RuleSelector
+	if ruleSelector != nil && ruleSelector.Selector != nil {
+		var identities []identity.NumericIdentity
+		if ruleSelector.Identities != nil {
+			identities = ruleSelector.Identities
+		}
+
+		labels := makeStringLabels(apiRule.Labels)
+		newRule.subjectSelector, _ = p.selectorCache.AddIdentitySelector(
+			newRule,
+			labels,
+			*ruleSelector.Selector,
+			identities...,
+		)
+	}
+
+	// Insert the rule into the repository
+	p.insert(newRule)
+
+	// Collect affected identities from the pre-computed selectors
+	// Rule selector identities
+	if ruleSelector := resolvedPolicy.Spec.RuleSelector; ruleSelector != nil {
+		for _, id := range ruleSelector.Identities {
+			affectedIDs.Insert(id)
+		}
+	}
+
+	// TODO: Handle ingress/egress rules and other fields from the resolved policy
+	// For now, we only handle the rule selector and the resourceID.
+	// Ingress and egress rules are resolved and updated to the repository when the
+	// endpoint regenerates its policy when policy_importer triggers update with
+	// endpoint manager.
+
+	// Release the old rules
+	for _, r := range oldRules {
+		p.releaseRule(r)
+	}
+
+	return affectedIDs, p.BumpRevision(), nil
 }

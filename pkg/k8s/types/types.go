@@ -8,6 +8,7 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 )
 
@@ -15,6 +16,12 @@ import (
 // +deepequal-gen=true
 type SlimCNP struct {
 	*v2.CiliumNetworkPolicy
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +deepequal-gen=true
+type SlimCRP struct {
+	*v2alpha1.CiliumResolvedPolicy
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

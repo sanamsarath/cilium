@@ -1109,6 +1109,10 @@ const (
 	// Network Policy.
 	EnableCiliumClusterwideNetworkPolicy = "enable-cilium-clusterwide-network-policy"
 
+	// EnableCentralizedNetworkPolicy enables support for Cilium Centralized
+	// Network Policy.
+	EnableCentralizedNetworkPolicy = "enable-centralized-network-policy"
+
 	// PolicyCIDRMatchMode defines the entities that CIDR selectors can reach
 	PolicyCIDRMatchMode = "policy-cidr-match-mode"
 
@@ -2212,6 +2216,9 @@ type DaemonConfig struct {
 	// Network Policy.
 	EnableCiliumClusterwideNetworkPolicy bool
 
+	// EnableCiliumCentralizedNetworkPolicy enables support for Cilium
+	EnableCentralizedNetworkPolicy bool
+
 	// PolicyCIDRMatchMode is the list of entities that can be selected by CIDR policy.
 	// Currently supported values:
 	// - world
@@ -2306,6 +2313,7 @@ var (
 		EnableK8sNetworkPolicy:               defaults.EnableK8sNetworkPolicy,
 		EnableCiliumNetworkPolicy:            defaults.EnableCiliumNetworkPolicy,
 		EnableCiliumClusterwideNetworkPolicy: defaults.EnableCiliumClusterwideNetworkPolicy,
+		EnableCentralizedNetworkPolicy:       defaults.EnableCentralizedNetworkPolicy,
 		PolicyCIDRMatchMode:                  defaults.PolicyCIDRMatchMode,
 		MaxConnectedClusters:                 defaults.MaxConnectedClusters,
 
@@ -3257,6 +3265,7 @@ func (c *DaemonConfig) Populate(vp *viper.Viper) {
 
 	c.EnableCiliumNetworkPolicy = vp.GetBool(EnableCiliumNetworkPolicy)
 	c.EnableCiliumClusterwideNetworkPolicy = vp.GetBool(EnableCiliumClusterwideNetworkPolicy)
+	c.EnableCentralizedNetworkPolicy = vp.GetBool(EnableCentralizedNetworkPolicy)
 
 	c.IdentityAllocationMode = vp.GetString(IdentityAllocationMode)
 	switch c.IdentityAllocationMode {

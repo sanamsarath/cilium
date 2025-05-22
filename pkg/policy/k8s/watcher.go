@@ -14,6 +14,7 @@ import (
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_networking_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
@@ -37,12 +38,13 @@ type policyWatcher struct {
 	// Number of outstanding requests still pending in the PolicyImporter
 	// This is only used during initial sync; we will increment these
 	// as new work is learned and decrement them as the importer makes progress.
-	knpSyncPending, cnpSyncPending, ccnpSyncPending atomic.Int64
+	knpSyncPending, cnpSyncPending, ccnpSyncPending, crpSyncPending atomic.Int64
 
 	cidrGroupSynced atomic.Bool
 
 	ciliumNetworkPolicies            resource.Resource[*cilium_v2.CiliumNetworkPolicy]
 	ciliumClusterwideNetworkPolicies resource.Resource[*cilium_v2.CiliumClusterwideNetworkPolicy]
+	ciliumResolvedPolicies           resource.Resource[*cilium_v2alpha1.CiliumResolvedPolicy]
 	ciliumCIDRGroups                 resource.Resource[*cilium_v2.CiliumCIDRGroup]
 	networkPolicies                  resource.Resource[*slim_networking_v1.NetworkPolicy]
 
@@ -53,6 +55,10 @@ type policyWatcher struct {
 	// The cache contains CNPs and CCNPs in their "original form"
 	// (i.e: pre-translation of each CIDRGroupRef to a CIDRSet).
 	cnpCache map[resource.Key]*types.SlimCNP
+
+	// crpCache contains CiliumResolvedPolicy resources. The cache is indexed on resource.Key,
+	// that contains both the name and namespace of the resource.
+	crpCache map[resource.Key]*types.SlimCRP
 
 	cidrGroupCache map[string]*cilium_v2.CiliumCIDRGroup
 
@@ -70,15 +76,34 @@ type policyWatcher struct {
 func (p *policyWatcher) watchResources(ctx context.Context) {
 	// Channels to receive results from the PolicyImporter
 	// Only used during initialization
-	var knpDone, cnpDone, ccnpDone chan uint64
-	if p.config.EnableK8sNetworkPolicy {
-		knpDone = make(chan uint64, 1024)
-	}
-	if p.config.EnableCiliumNetworkPolicy {
-		cnpDone = make(chan uint64, 1024)
-	}
-	if p.config.EnableCiliumClusterwideNetworkPolicy {
-		ccnpDone = make(chan uint64, 1024)
+	var knpDone, cnpDone, ccnpDone, crpDone chan uint64
+
+	// If the centralized network policy is enabled, we need to
+	// watch only the CRP resources.
+	if p.config.EnableCentralizedNetworkPolicy {
+		// set knpDone, cnpDone and ccnpDone to nil, so that we don't
+		// try to consume them in the goroutine below.
+		knpDone = nil
+		cnpDone = nil
+		ccnpDone = nil
+		// Initialize the channel to synchronize the CRP resources
+		crpDone = make(chan uint64, 1024)
+	} else {
+		// If CentralizedNetworkPolicy is not enabled, set crpDone
+		// to nil.
+		crpDone = nil
+
+		// Initialize the channels to synchronize the KNP, CNP and CCNP
+		// resources with the PolicyImporter.
+		if p.config.EnableK8sNetworkPolicy {
+			knpDone = make(chan uint64, 1024)
+		}
+		if p.config.EnableCiliumNetworkPolicy {
+			cnpDone = make(chan uint64, 1024)
+		}
+		if p.config.EnableCiliumClusterwideNetworkPolicy {
+			ccnpDone = make(chan uint64, 1024)
+		}
 	}
 
 	// Consume result channels, decrement outstanding work counter.
@@ -100,18 +125,25 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 				if p.ccnpSyncPending.Add(-1) <= 0 {
 					ccnpDone = nil
 				}
+			case <-crpDone:
+				if p.crpSyncPending.Add(-1) <= 0 {
+					crpDone = nil
+				}
 			}
-			if knpDone == nil && cnpDone == nil && ccnpDone == nil {
-				break
+			if knpDone == nil && cnpDone == nil && ccnpDone == nil && crpDone == nil {
+				// All channels are closed, we can exit
+				// the goroutine.
+				p.log.Info("All policy resources synchronized!")
+				return
 			}
 		}
-		p.log.Info("All policy resources synchronized!")
 	}()
 	go func() {
 		var (
 			knpEvents       <-chan resource.Event[*slim_networking_v1.NetworkPolicy]
 			cnpEvents       <-chan resource.Event[*cilium_v2.CiliumNetworkPolicy]
 			ccnpEvents      <-chan resource.Event[*cilium_v2.CiliumClusterwideNetworkPolicy]
+			crpEvents       <-chan resource.Event[*cilium_v2alpha1.CiliumResolvedPolicy]
 			cidrGroupEvents <-chan resource.Event[*cilium_v2.CiliumCIDRGroup]
 			serviceEvents   <-chan k8s.ServiceNotification
 		)
@@ -120,22 +152,34 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 		knpDone := knpDone
 		cnpDone := cnpDone
 		ccnpDone := ccnpDone
+		crpDone := crpDone
 
-		if p.config.EnableK8sNetworkPolicy {
-			knpEvents = p.networkPolicies.Events(ctx)
-		}
-		if p.config.EnableCiliumNetworkPolicy {
-			cnpEvents = p.ciliumNetworkPolicies.Events(ctx)
-		}
-		if p.config.EnableCiliumClusterwideNetworkPolicy {
-			ccnpEvents = p.ciliumClusterwideNetworkPolicies.Events(ctx)
-		}
-		if p.config.EnableCiliumNetworkPolicy || p.config.EnableCiliumClusterwideNetworkPolicy {
-			// Cilium CDR Group CRD is only used with CNP/CCNP.
-			// https://docs.cilium.io/en/latest/network/kubernetes/ciliumcidrgroup/
-			cidrGroupEvents = p.ciliumCIDRGroups.Events(ctx)
-			// Service Cache Notifications are only used with CNP/CCNP.
-			serviceEvents = p.svcCacheNotifications
+		// If the centralized network policy is enabled, we need to
+		// watch only the CRP resources, else we need to watch
+		// the KNP, CNP and CCNP resources.
+		if p.config.EnableCentralizedNetworkPolicy {
+			crpEvents = p.ciliumResolvedPolicies.Events(ctx)
+			// Warning: CIDR and Service selector resferences in source
+			// policy (cnp, ccnp, knp) are expected to be resolved by Central Network Policy
+			// controller, so CRP will have resolved data - no need to watch
+			// CIDR and Service Notifications??
+		} else {
+			if p.config.EnableK8sNetworkPolicy {
+				knpEvents = p.networkPolicies.Events(ctx)
+			}
+			if p.config.EnableCiliumNetworkPolicy {
+				cnpEvents = p.ciliumNetworkPolicies.Events(ctx)
+			}
+			if p.config.EnableCiliumClusterwideNetworkPolicy {
+				ccnpEvents = p.ciliumClusterwideNetworkPolicies.Events(ctx)
+			}
+			if p.config.EnableCiliumNetworkPolicy || p.config.EnableCiliumClusterwideNetworkPolicy {
+				// Cilium CDR Group CRD is only used with CNP/CCNP.
+				// https://docs.cilium.io/en/latest/network/kubernetes/ciliumcidrgroup/
+				cidrGroupEvents = p.ciliumCIDRGroups.Events(ctx)
+				// Service Cache Notifications are only used with CNP/CCNP.
+				serviceEvents = p.svcCacheNotifications
+			}
 		}
 
 		for {
@@ -232,6 +276,33 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 					p.onDelete(slimCNP, event.Key, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, resourceID, ccnpDone)
 				}
 				reportCNPChangeMetrics(err)
+				event.Done(err)
+			case event, ok := <-crpEvents:
+				if !ok {
+					crpEvents = nil
+					break
+				}
+				if event.Kind == resource.Sync {
+					crpDone <- 0
+					crpDone = nil
+					event.Done(nil)
+					continue
+				}
+				crp := &types.SlimCRP{
+					CiliumResolvedPolicy: &cilium_v2alpha1.CiliumResolvedPolicy{
+						TypeMeta:   event.Object.TypeMeta,
+						ObjectMeta: event.Object.ObjectMeta,
+						Spec:       event.Object.Spec,
+					},
+				}
+
+				var err error
+				switch event.Kind {
+				case resource.Upsert:
+					err = p.onCRPUpsert(crp, event.Key, k8sAPIGroupCiliumResolvedPolicyV2Alpha1, crpDone)
+				case resource.Delete:
+					p.onCRPDelete(crp, event.Key, k8sAPIGroupCiliumResolvedPolicyV2Alpha1, crpDone)
+				}
 				event.Done(err)
 			case event, ok := <-cidrGroupEvents:
 				if !ok {

@@ -62,6 +62,15 @@ func agentCRDResourceNames() []string {
 		result = append(result, CRDResourceName(v2.CCNPName))
 	}
 
+	// CilumResolvedPolicy CRD will be registerd with k8s
+	// by centralized policy controller, but for testing purposes
+	// we need to register it from cilium agent and use a config
+	// flag to enable/disable it.
+	// TODO: remove this once we have CRP controller in place.
+	if option.Config.EnableCentralizedNetworkPolicy {
+		result = append(result, CRDResourceName(v2alpha1.CRPName))
+	}
+
 	if option.Config.EnableCiliumNetworkPolicy || option.Config.EnableCiliumClusterwideNetworkPolicy {
 		result = append(result, CRDResourceName(v2.CCGName))
 	}
