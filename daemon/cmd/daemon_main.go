@@ -1010,6 +1010,9 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.MarkHidden(option.EnableCiliumClusterwideNetworkPolicy)
 	option.BindEnv(vp, option.EnableCiliumClusterwideNetworkPolicy)
 
+	flags.Bool(option.EnableCentralizedNetworkPolicy, defaults.EnableCentralizedNetworkPolicy, "Enable centralized network policy functionality")
+	option.BindEnv(vp, option.EnableCentralizedNetworkPolicy)
+
 	flags.StringSlice(option.PolicyCIDRMatchMode, defaults.PolicyCIDRMatchMode, "The entities that can be selected by CIDR policy. Supported values: 'nodes'")
 	option.BindEnv(vp, option.PolicyCIDRMatchMode)
 
