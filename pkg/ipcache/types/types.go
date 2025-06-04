@@ -49,6 +49,7 @@ var (
 	ResourceKindCCNP      = ResourceKind("ccnp")
 	ResourceKindCIDRGroup = ResourceKind("cidrgroup")
 	ResourceKindCNP       = ResourceKind("cnp")
+	ResourceKindCRP       = ResourceKind("crp")
 	ResourceKindDaemon    = ResourceKind("daemon")
 	ResourceKindEndpoint  = ResourceKind("ep")
 	ResourceKindFile      = ResourceKind("file")

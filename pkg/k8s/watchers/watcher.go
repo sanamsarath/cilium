@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/k8s/synced"
@@ -36,6 +37,7 @@ import (
 const (
 	k8sAPIGroupCiliumNetworkPolicyV2            = "cilium/v2::CiliumNetworkPolicy"
 	k8sAPIGroupCiliumClusterwideNetworkPolicyV2 = "cilium/v2::CiliumClusterwideNetworkPolicy"
+	k8sAPIGroupCiliumResolvedPolicyV2Alpha1     = "cilium/v2alpha1::CiliumResolvedPolicy"
 	k8sAPIGroupCiliumCIDRGroupV2                = "cilium/v2::CiliumCIDRGroup"
 	k8sAPIGroupCiliumNodeV2                     = "cilium/v2::CiliumNode"
 	k8sAPIGroupCiliumEndpointV2                 = "cilium/v2::CiliumEndpoint"
@@ -210,6 +212,7 @@ type watcherInfo struct {
 var ciliumResourceToGroupMapping = map[string]watcherInfo{
 	synced.CRDResourceName(cilium_v2.CNPName):           {waitOnly, k8sAPIGroupCiliumNetworkPolicyV2},            // Handled in pkg/policy/k8s/
 	synced.CRDResourceName(cilium_v2.CCNPName):          {waitOnly, k8sAPIGroupCiliumClusterwideNetworkPolicyV2}, // Handled in pkg/policy/k8s/
+	synced.CRDResourceName(cilium_v2alpha1.CRPName):     {waitOnly, k8sAPIGroupCiliumResolvedPolicyV2Alpha1},     // Handled in pkg/policy/k8s/
 	synced.CRDResourceName(cilium_v2.CEPName):           {start, k8sAPIGroupCiliumEndpointV2},                    // ipcache
 	synced.CRDResourceName(cilium_v2.CNName):            {start, k8sAPIGroupCiliumNodeV2},
 	synced.CRDResourceName(cilium_v2.CIDName):           {skip, ""}, // Handled in pkg/k8s/identitybackend/
@@ -231,7 +234,7 @@ var ciliumResourceToGroupMapping = map[string]watcherInfo{
 	synced.CRDResourceName(v2alpha1.CPIPName):           {skip, ""}, // Handled by multi-pool IPAM allocator
 }
 
-func GetGroupsForCiliumResources(logger *slog.Logger, ciliumResources []string) ([]string, []string) {
+func GetGroupsForCiliumResources(logger *slog.Logger, cfg WatcherConfiguration, ciliumResources []string) ([]string, []string) {
 	ciliumGroups := make([]string, 0, len(ciliumResources))
 	waitOnlyList := make([]string, 0)
 
@@ -240,6 +243,22 @@ func GetGroupsForCiliumResources(logger *slog.Logger, ciliumResources []string) 
 		if !ok {
 			logging.Fatal(logger, fmt.Sprintf("Unknown resource %s. Please update pkg/k8s/watchers to understand this type.", r))
 		}
+
+		// If centralized network policy is enabled, skip CNP, CCNP, CCG, and CRP resources
+		if cfg.CentralizedNetworkPolicyEnabled() {
+			if r == synced.CRDResourceName(cilium_v2.CNPName) ||
+				r == synced.CRDResourceName(cilium_v2.CCNPName) ||
+				r == synced.CRDResourceName(cilium_v2.CCGName) {
+				logging.DefaultLogger.Info("Skipping CiliumNetworkPolicy, CiliumClusterwideNetworkPolicy, and CiliumCIDRGroup resources in centralized network policy mode +++++++++++++++")
+				continue // Skip these resources
+			}
+		} else {
+			// If centralized network policy is not enabled, skip CRP
+			if r == synced.CRDResourceName(cilium_v2alpha1.CRPName) {
+				continue // Skip CiliumResolvedPolicy
+			}
+		}
+
 		switch groupInfo.kind {
 		case skip:
 			continue
@@ -286,6 +305,10 @@ type WatcherConfiguration interface {
 	// In this case, we don't need to start the CiliumNode and CiliumEndpoint watchers at
 	// all, given that equivalent information is propagated via the KVStore.
 	KVstoreEnabled() bool
+
+	// CentralizedNetworkPolicyEnabled returns true if centralized network policy mode is enabled.
+	// In this mode, CNP, CCNP, and CCG resources should be skipped by the watcher.
+	CentralizedNetworkPolicyEnabled() bool
 }
 
 // enableK8sWatchers starts watchers for given resources.

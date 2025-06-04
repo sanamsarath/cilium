@@ -31,8 +31,18 @@ import (
 	"github.com/cilium/cilium/pkg/time"
 )
 
+// PolicyImporter is the interface for importing policies into the policy repository.
+// It supports two types of policy updates:
+//
+//  1. Traditional policy updates with rules that need to be processed and resolved
+//     to determine affected identities
+//
+//  2. Centralized policy resolution updates (CiliumResolvedPolicy) containing
+//     pre-computed identity mappings that can bypass the expensive identity resolution
+//     process
 type PolicyImporter interface {
 	UpdatePolicy(*policytypes.PolicyUpdate)
+	UpdateResolvedIdentityPolicy(*policy.ResolvedIdentityPolicyUpdate)
 }
 
 type policyImporterParams struct {
@@ -60,7 +70,8 @@ type policyImporter struct {
 	// so we can allocate and release prefixes as policy changes.
 	prefixesByResource map[ipcachetypes.ResourceID][]netip.Prefix
 
-	q chan *policytypes.PolicyUpdate
+	q               chan *policytypes.PolicyUpdate
+	resolvedPolicyQ chan *policy.ResolvedIdentityPolicyUpdate
 }
 
 type ipcacher interface {
@@ -81,7 +92,8 @@ func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
 		ipc:          cfg.IPCache,
 		monitorAgent: cfg.MonitorAgent,
 
-		q: make(chan *policytypes.PolicyUpdate, cfg.Config.PolicyQueueSize),
+		q:               make(chan *policytypes.PolicyUpdate, cfg.Config.PolicyQueueSize),
+		resolvedPolicyQ: make(chan *policy.ResolvedIdentityPolicyUpdate, cfg.Config.PolicyQueueSize),
 
 		prefixesByResource: map[ipcachetypes.ResourceID][]netip.Prefix{},
 	}
@@ -91,7 +103,13 @@ func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
 		int(cfg.Config.PolicyQueueSize), 10*time.Millisecond,
 		concat)
 
+	bufCRP := stream.Buffer(
+		stream.FromChannel(i.resolvedPolicyQ),
+		int(cfg.Config.PolicyQueueSize), 10*time.Millisecond,
+		concatCRP)
+
 	cfg.JobGroup.Add(job.Observer("policy-importer", i.processUpdates, buf))
+	cfg.JobGroup.Add(job.Observer("policy-importer-crp", i.processCRPUpdates, bufCRP))
 
 	return i
 }
@@ -105,7 +123,16 @@ func (i *policyImporter) UpdatePolicy(u *policytypes.PolicyUpdate) {
 	i.q <- u
 }
 
+func (i *policyImporter) UpdateResolvedIdentityPolicy(upd *policy.ResolvedIdentityPolicyUpdate) {
+	i.resolvedPolicyQ <- upd
+}
+
 func concat(buf []*policytypes.PolicyUpdate, in *policytypes.PolicyUpdate) []*policytypes.PolicyUpdate {
+	buf = append(buf, in)
+	return buf
+}
+
+func concatCRP(buf []*policy.ResolvedIdentityPolicyUpdate, in *policy.ResolvedIdentityPolicyUpdate) []*policy.ResolvedIdentityPolicyUpdate {
 	buf = append(buf, in)
 	return buf
 }
@@ -396,6 +423,69 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 
 	// Remove stale prefix metadata from the ipcache.
 	i.prunePrefixes(oldPrefixes)
+	return nil
+}
+
+func (i *policyImporter) processCRPUpdates(ctx context.Context, updates []*policy.ResolvedIdentityPolicyUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	i.log.Info("Processing CRP updates", logfields.Count, len(updates))
+
+	// Process each resolved policy to update the repository
+	idsToRegen := &set.Set[identity.NumericIdentity]{}
+	startRevision := i.repo.GetRevision()
+	endRevision := startRevision
+
+	for _, update := range updates {
+		var affectedIdentities *set.Set[identity.NumericIdentity]
+		var newRevision uint64
+
+		switch update.Operation {
+		case policy.ResolvedIdentityPolicyUpsert:
+			// Insert SubjectPolicyState entries into the repository
+			affectedIdentities, newRevision = i.repo.InsertCRPRuleSet(update.CrpRuleSet)
+
+			i.log.Debug("Processed CRP upsert",
+				logfields.CiliumNetworkPolicyName, update.CrpRuleSet.SourcePolicyUID,
+				logfields.PolicyRevision, newRevision,
+				logfields.Identity, slices.Collect(truncate(affectedIdentities.Members(), 100)))
+
+		case policy.ResolvedIdentityPolicyDelete:
+			// Delete the CRP rule set from the repository
+			affectedIdentities, newRevision = i.repo.DeleteCRPRuleSet(update.CrpRuleSet)
+
+			i.log.Debug("Processed CRP delete",
+				logfields.CiliumNetworkPolicyName, update.CrpRuleSet.SourcePolicyUID,
+				logfields.PolicyRevision, newRevision,
+				logfields.Identity, slices.Collect(truncate(affectedIdentities.Members(), 100)))
+
+		default:
+			i.log.Error("Unknown CRP operation",
+				"operation", update.Operation.String(),
+				logfields.CiliumNetworkPolicyName, update.CrpRuleSet.SourcePolicyUID)
+			continue
+		}
+
+		endRevision = newRevision
+		idsToRegen.Merge(*affectedIdentities)
+
+		// Report that the policy has been processed
+		if update.DoneChan != nil {
+			update.DoneChan <- endRevision
+		}
+
+		// TODO: Send monitor notification for CRP policy update
+	}
+
+	// All CRP updates have been applied; regenerate all affected endpoints
+	i.log.Info("CRP repository updates complete, triggering endpoint updates",
+		logfields.PolicyRevision, endRevision)
+	if i.epm != nil {
+		i.epm.UpdatePolicy(idsToRegen, startRevision, endRevision)
+	}
+
 	return nil
 }
 

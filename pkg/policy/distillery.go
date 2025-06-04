@@ -4,12 +4,19 @@
 package policy
 
 import (
+	"log/slog"
 	"sync/atomic"
 
+	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/container/versioned"
+	"github.com/cilium/cilium/pkg/identity"
 	identityPkg "github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
+	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 // policyCache represents a cache of resolved policies for identities.
@@ -199,4 +206,200 @@ func (cip *cachedSelectorPolicy) setPolicy(policy *selectorPolicy, endpointID ui
 		// Release the references the previous policy holds on the selector cache.
 		oldPolicy.detach(false, endpointID)
 	}
+}
+
+// ////////////////////////SubjectPolicyState - helper functions //////////////////////////
+// resolvedIdentityPolicyCache represents a cache of resolved policies for subjects.
+type resolvedIdentityPolicyCache struct {
+	lock.Mutex
+	logger   *slog.Logger
+	repo     *Repository
+	policies map[identityPkg.NumericIdentity]*SubjectPolicyState
+}
+
+// newresolvedIdentityPolicyCache creates a new cache of SubjectPolicyState.
+func newresolvedIdentityPolicyCache(repo *Repository) *resolvedIdentityPolicyCache {
+	return &resolvedIdentityPolicyCache{
+		logger:   repo.logger.With("subsys", "resolvedIdentityPolicyCache"),
+		repo:     repo,
+		policies: make(map[identityPkg.NumericIdentity]*SubjectPolicyState),
+	}
+}
+
+// Update CRPRuleset in the resolvedIdentityPolicyCache.
+func (cache *resolvedIdentityPolicyCache) UpdateCRPRuleset(ruleSet *CRPRuleSet) *set.Set[identityPkg.NumericIdentity] {
+	// for each subject identity in the CRPRuleset, lookup or create
+	// SubjectPolicyState and upsert the CRPRuleset.
+	// Return the set of subject identities that were updated.
+	affectedIdentities := &set.Set[identityPkg.NumericIdentity]{}
+	for subjectID := range ruleSet.SubjectIdentities {
+		// lookup or create SubjectPolicyState for the subject identity
+		sps := cache.lookupOrCreateSubjectPolicyState(subjectID)
+		if sps == nil {
+			cache.logger.Error("Failed to lookup or create SubjectPolicyState for CRPRuleset",
+				"sourcePolicyUID", ruleSet.SourcePolicyUID, "subjectID", subjectID)
+			continue
+		}
+		sps.upsertCRPRuleSet(ruleSet)
+		affectedIdentities.Insert(subjectID)
+	}
+	return affectedIdentities
+}
+
+// Delete CRPRuleset in the resolvedIdentityPolicyCache.
+func (cache *resolvedIdentityPolicyCache) DeleteCRPRuleset(rulset *CRPRuleSet) *set.Set[identityPkg.NumericIdentity] {
+	// for each subject identity in the CRPRuleset, lookup SubjectPolicyState
+	// and delete the CRPRuleset.
+	affectedIdentities := &set.Set[identityPkg.NumericIdentity]{}
+	for subjectID := range rulset.SubjectIdentities {
+		// lookup SubjectPolicyState for the subject identity
+		sps := cache.lookupOrCreateSubjectPolicyState(subjectID)
+		if sps == nil {
+			cache.logger.Info("Failed to lookup SubjectPolicyState for CRPRuleset",
+				"sourcePolicyUID", rulset.SourcePolicyUID, "subjectID", subjectID)
+			continue
+		}
+		sps.deleteCRPRuleSet(rulset.SourcePolicyUID)
+		affectedIdentities.Insert(subjectID)
+	}
+	return affectedIdentities
+}
+
+// lookupOrCreate adds a new SubjectPolicyState for the specified Identity,
+// if it does not already exist, and returns the existing or newly created.
+func (cache *resolvedIdentityPolicyCache) lookupOrCreateSubjectPolicyState(id identityPkg.NumericIdentity) *SubjectPolicyState {
+	cache.Lock()
+	defer cache.Unlock()
+	sps, ok := cache.policies[id]
+	if !ok {
+		sps = &SubjectPolicyState{
+			ComputedPolicy:    nil,
+			MatchingCRPUIDset: make(map[string]*CRPRuleSet),
+		}
+		cache.policies[id] = sps
+	}
+	return sps
+}
+
+// delete removes the SubjectPolicyState for the specified identity.
+func (cache *resolvedIdentityPolicyCache) delete(identity *identityPkg.Identity) bool {
+	cache.Lock()
+	defer cache.Unlock()
+	sps, ok := cache.policies[identity.ID]
+	if ok {
+		delete(cache.policies, identity.ID)
+		sps.ComputedPolicy = nil // Clear the cached policy
+	}
+	return ok
+}
+
+// getPolicy returns the cached selectorPolicy from the SubjectPolicyState
+// lock should be held on the SubjectPolicyState when calling this method.
+func (sps *SubjectPolicyState) getPolicy() *selectorPolicy {
+	return sps.ComputedPolicy
+}
+
+// upsertCRPRuleSet adds a CRPRuleSet to the SubjectPolicyState for the specified identity.
+func (sps *SubjectPolicyState) upsertCRPRuleSet(ruleSet *CRPRuleSet) {
+	// acquire lock
+	sps.Lock()
+	defer sps.Unlock()
+	sps.MatchingCRPUIDset[ruleSet.SourcePolicyUID] = ruleSet
+}
+
+// deleteCRPRuleSet removes a CRPRuleSet from the SubjectPolicyState for the specified identity.
+func (sps *SubjectPolicyState) deleteCRPRuleSet(sourceUID string) {
+	// acquire lock
+	sps.Lock()
+	defer sps.Unlock()
+	delete(sps.MatchingCRPUIDset, sourceUID)
+}
+
+// updateSelectorPolicy resolves the policy for the security identity of the
+// specified endpoint and stores it internally. It will skip policy resolution
+// if the cached policy is already at the revision specified in the repo.
+// endpointID
+//
+// Returns whether the cache was updated, or an error.
+//
+// Must be called with repo.Mutex held for reading.
+func (cache *resolvedIdentityPolicyCache) updateSelectorPolicy(identity *identityPkg.Identity) (*selectorPolicy, bool, error) {
+	sps := cache.lookupOrCreateSubjectPolicyState(identity.ID)
+
+	// Lock the 'sps' for the duration of the revision check and
+	// the possible policy update.
+	sps.Lock()
+	defer sps.Unlock()
+
+	// repo revision
+	rev := cache.repo.GetRevision()
+	// Don't resolve policy if it was already done for this or later revision.
+	if selPolicy := sps.getPolicy(); selPolicy != nil && selPolicy.Revision >= rev {
+		return selPolicy, false, nil
+	}
+
+	// Resolve the policies, which could fail
+	selPolicy, err := sps.resolvePolicyLocked(identity, rev, cache.repo)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Set the computed policy in the SubjectPolicyState
+	sps.ComputedPolicy = selPolicy
+
+	// set revision in the selectorPolicy
+	selPolicy.Revision = rev
+
+	return selPolicy, true, nil
+}
+
+func (sps *SubjectPolicyState) resolvePolicyLocked(securityIdentity *identity.Identity, rev uint64, repo *Repository) (*selectorPolicy, error) {
+	calculatedPolicy := &selectorPolicy{
+		Revision:      rev,
+		SelectorCache: repo.GetSelectorCache(), // passing this to satisfy selctorPolicy attach and detach called by callers(like Endpoints)
+		L4Policy:      NewL4Policy(rev),
+	}
+
+	policyCtx := policyContext{
+		repo:               repo,
+		ns:                 securityIdentity.LabelArray.Get(labels.LabelSourceK8sKeyPrefix + k8sConst.PodNamespaceLabel),
+		defaultDenyIngress: false, // controller is expected to handle this?? otherwise we can fix it here
+		defaultDenyEgress:  false, // controller is expected to handle this?? otherwise we can fix it here
+		traceEnabled:       option.Config.TracingEnabled(),
+		logger:             repo.logger.With(logfields.Identity, securityIdentity.ID),
+	}
+
+	newL4IngressPolicy, ingressExists, err := sps.MatchingCRPUIDset.resolveL4IngressPolicy(&policyCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	newL4EgressPolicy, egressExists, err := sps.MatchingCRPUIDset.resolveL4EgressPolicy(&policyCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the L4 policies in the calculated policy
+	if newL4IngressPolicy != nil {
+		calculatedPolicy.L4Policy.Ingress.PortRules = newL4IngressPolicy
+	}
+
+	if ingressExists {
+		calculatedPolicy.IngressPolicyEnabled = true
+	}
+
+	if newL4EgressPolicy != nil {
+		calculatedPolicy.L4Policy.Egress.PortRules = newL4EgressPolicy
+	}
+
+	if egressExists {
+		calculatedPolicy.EgressPolicyEnabled = true
+	}
+
+	// Attach doesn't do much in centralized mode, as we don't listen on increamental updates
+	// from the L4 Filters but calculates redirect features from all the all L4 filters and
+	// update the L4Policy in the selectorPolicy.
+	calculatedPolicy.Attach(&policyCtx)
+
+	return calculatedPolicy, nil
 }

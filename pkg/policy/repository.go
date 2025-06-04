@@ -48,9 +48,14 @@ type PolicyRepository interface {
 	GetRevision() uint64
 	GetRulesList() *models.Policy
 	GetSelectorCache() *SelectorCache
+	GetResolvedIdentityPolicyCache() *resolvedIdentityPolicyCache
 	Iterate(f func(rule *api.Rule))
 	ReplaceByResource(rules api.Rules, resource ipcachetypes.ResourceID) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, oldRevCnt int)
 	ReplaceByLabels(rules api.Rules, searchLabelsList []labels.LabelArray) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, oldRevCnt int)
+	// InsertCRPRuleSet inserts a CRP rule set into the resolved identity policy cache
+	InsertCRPRuleSet(crpRuleSet *CRPRuleSet) (*set.Set[identity.NumericIdentity], uint64)
+	// DeleteCRPRuleSet deletes a CRP rule set from the resolved identity policy cache
+	DeleteCRPRuleSet(crpRuleSet *CRPRuleSet) (*set.Set[identity.NumericIdentity], uint64)
 	Search(lbls labels.LabelArray) (api.Rules, uint64)
 }
 
@@ -86,6 +91,9 @@ type Repository struct {
 
 	// PolicyCache tracks the selector policies created from this repo
 	policyCache *policyCache
+
+	// ResolvedIdentityPolicyCache tracks the policies for the resolved identities
+	resolvedIdentityPolicyCache *resolvedIdentityPolicyCache
 
 	certManager certificatemanager.CertificateManager
 
@@ -129,6 +137,7 @@ func NewPolicyRepository(
 	}
 	repo.revision.Store(1)
 	repo.policyCache = newPolicyCache(repo, idmgr)
+	repo.resolvedIdentityPolicyCache = newresolvedIdentityPolicyCache(repo)
 	return repo
 }
 
@@ -499,7 +508,14 @@ func (r *Repository) GetSelectorPolicy(id *identity.Identity, skipRevision uint6
 	stats.SelectorPolicyCalculation().Start()
 	// This may call back in to the (locked) repository to generate the
 	// selector policy
-	sp, updated, err := r.policyCache.updateSelectorPolicy(id, endpointID)
+	var sp SelectorPolicy
+	var err error
+	var updated bool
+	if option.Config.EnableCentralizedNetworkPolicy {
+		sp, updated, err = r.resolvedIdentityPolicyCache.updateSelectorPolicy(id)
+	} else {
+		sp, updated, err = r.policyCache.updateSelectorPolicy(id, endpointID)
+	}
 	stats.SelectorPolicyCalculation().EndError(err)
 
 	// If we hit cache, reset the statistics.
@@ -593,6 +609,21 @@ func (p *Repository) ReplaceByLabels(rules api.Rules, searchLabelsList []labels.
 	return affectedIDs, p.BumpRevision(), len(oldRules)
 }
 
+// InsertCRPRuleSet inserts a CRP rule set into the resolved identity policy cache
+// and returns the set of affected identities and the new repository revision.
+func (p *Repository) InsertCRPRuleSet(crpRuleSet *CRPRuleSet) (*set.Set[identity.NumericIdentity], uint64) {
+	affectedIds := p.resolvedIdentityPolicyCache.UpdateCRPRuleset(crpRuleSet)
+	newPolicyRev := p.BumpRevision()
+	return affectedIds, newPolicyRev
+}
+
+// DeleteCRPRuleSet deletes a CRP rule set from the resolved identity policy cache
+func (p *Repository) DeleteCRPRuleSet(crpRuleSet *CRPRuleSet) (*set.Set[identity.NumericIdentity], uint64) {
+	affectedIdentities := p.resolvedIdentityPolicyCache.DeleteCRPRuleset(crpRuleSet)
+	newPolicyRev := p.BumpRevision()
+	return affectedIdentities, newPolicyRev
+}
+
 // GetPolicySnapshot returns a map of all the SelectorPolicies in the repository.
 func (p *Repository) GetPolicySnapshot() map[identity.NumericIdentity]SelectorPolicy {
 	p.mutex.RLock()
@@ -600,3 +631,10 @@ func (p *Repository) GetPolicySnapshot() map[identity.NumericIdentity]SelectorPo
 
 	return p.policyCache.GetPolicySnapshot()
 }
+
+// Get ResolvedIdentityPolicyCache returns the cache of resolved identity policies
+func (p *Repository) GetResolvedIdentityPolicyCache() *resolvedIdentityPolicyCache {
+	return p.resolvedIdentityPolicyCache
+}
+
+//

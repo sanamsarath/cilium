@@ -227,6 +227,20 @@ func CiliumClusterwideNetworkPolicyResource(params CiliumResourceParams, opts ..
 	return resource.New[*cilium_api_v2.CiliumClusterwideNetworkPolicy](params.Lifecycle, lw, resource.WithMetric("CiliumClusterwideNetworkPolicy"), resource.WithCRDSync(params.CRDSyncPromise)), nil
 }
 
+// CiliumResolvedPolicyResource builds the Resource[CiliumResolvedPolicy] object
+func CiliumResolvedPolicyResource(params CiliumResourceParams, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2alpha1.CiliumResolvedPolicy], error) {
+	if !params.ClientSet.IsEnabled() {
+		return nil, nil
+	}
+	lw := utils.ListerWatcherWithModifiers(
+		utils.ListerWatcherFromTyped[*cilium_api_v2alpha1.CiliumResolvedPolicyList](params.ClientSet.CiliumV2alpha1().CiliumResolvedPolicies()),
+		opts...,
+	)
+	return resource.New[*cilium_api_v2alpha1.CiliumResolvedPolicy](params.Lifecycle, lw,
+		resource.WithMetric("CiliumResolvedPolicy"),
+		resource.WithCRDSync(params.CRDSyncPromise)), nil
+}
+
 func CiliumCIDRGroupResource(params CiliumResourceParams, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2.CiliumCIDRGroup], error) {
 	if !params.ClientSet.IsEnabled() {
 		return nil, nil

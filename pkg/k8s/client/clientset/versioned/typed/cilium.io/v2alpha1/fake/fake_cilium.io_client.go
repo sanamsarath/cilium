@@ -67,6 +67,10 @@ func (c *FakeCiliumV2alpha1) CiliumPodIPPools() v2alpha1.CiliumPodIPPoolInterfac
 	return newFakeCiliumPodIPPools(c)
 }
 
+func (c *FakeCiliumV2alpha1) CiliumResolvedPolicies() v2alpha1.CiliumResolvedPolicyInterface {
+	return newFakeCiliumResolvedPolicies(c)
+}
+
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
 func (c *FakeCiliumV2alpha1) RESTClient() rest.Interface {

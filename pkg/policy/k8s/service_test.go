@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
@@ -33,7 +34,8 @@ import (
 )
 
 type fakePolicyImporter struct {
-	OnUpdatePolicy func(upd *policytypes.PolicyUpdate)
+	OnUpdatePolicy                 func(upd *policytypes.PolicyUpdate)
+	OnUpdateResolvedIdentityPolicy func(crpSet *v2alpha1.CiliumResolvedPolicySpec, DoneChan chan<- uint64)
 }
 
 func (f *fakePolicyImporter) UpdatePolicy(upd *policytypes.PolicyUpdate) {
@@ -41,6 +43,15 @@ func (f *fakePolicyImporter) UpdatePolicy(upd *policytypes.PolicyUpdate) {
 		f.OnUpdatePolicy(upd)
 	} else {
 		panic("OnUpdatePolicy(upd *policytypes.PolicyUpdate) was called but was not set")
+	}
+}
+
+func (f *fakePolicyImporter) UpdateResolvedIdentityPolicy(crpSet *v2alpha1.CiliumResolvedPolicySpec, DoneChan chan<- uint64) {
+	if f.OnUpdateResolvedIdentityPolicy != nil {
+		f.UpdateResolvedIdentityPolicy(crpSet, DoneChan)
+	} else {
+		return
+		// not implemented yet, so don't panic
 	}
 }
 

@@ -414,7 +414,7 @@ func allResourceGroups(logger *slog.Logger, cfg watchers.WatcherConfiguration) (
 		waitForCachesOnly = append(waitForCachesOnly, resources.K8sAPIGroupNetworkingV1Core)
 	}
 
-	ciliumGroups, waitOnlyList := watchers.GetGroupsForCiliumResources(logger, k8sSynced.AgentCRDResourceNames())
+	ciliumGroups, waitOnlyList := watchers.GetGroupsForCiliumResources(logger, cfg, k8sSynced.AgentCRDResourceNames())
 	waitForCachesOnly = append(waitForCachesOnly, waitOnlyList...)
 
 	return append(k8sGroups, ciliumGroups...), waitForCachesOnly

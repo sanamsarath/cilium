@@ -14,6 +14,7 @@ import (
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_networking_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
@@ -31,6 +32,7 @@ const (
 	k8sAPIGroupCiliumNetworkPolicyV2            = "cilium/v2::CiliumNetworkPolicy"
 	k8sAPIGroupCiliumClusterwideNetworkPolicyV2 = "cilium/v2::CiliumClusterwideNetworkPolicy"
 	k8sAPIGroupCiliumCIDRGroupV2                = "cilium/v2::CiliumCIDRGroup"
+	k8sAPIGroupCiliumResolvedPolicyV2Alpha1     = "cilium/v2alpha1::CiliumResolvedPolicy"
 )
 
 // Cell starts the K8s policy watcher. The K8s policy watcher watches all
@@ -80,6 +82,7 @@ type PolicyWatcherParams struct {
 	CiliumClusterwideNetworkPolicies resource.Resource[*cilium_v2.CiliumClusterwideNetworkPolicy]
 	CiliumCIDRGroups                 resource.Resource[*cilium_v2.CiliumCIDRGroup]
 	NetworkPolicies                  resource.Resource[*slim_networking_v1.NetworkPolicy]
+	CiliumResolvedPolicies           resource.Resource[*cilium_v2alpha1.CiliumResolvedPolicy]
 
 	MetricsManager CNPMetrics
 }
@@ -105,10 +108,12 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 		ciliumClusterwideNetworkPolicies: params.CiliumClusterwideNetworkPolicies,
 		ciliumCIDRGroups:                 params.CiliumCIDRGroups,
 		networkPolicies:                  params.NetworkPolicies,
+		ciliumResolvedPolicies:           params.CiliumResolvedPolicies,
 
 		cnpCache:       make(map[resource.Key]*types.SlimCNP),
 		cidrGroupCache: make(map[string]*cilium_v2.CiliumCIDRGroup),
 		cidrGroupCIDRs: make(map[string]sets.Set[netip.Prefix]),
+		crpCache:       make(map[resource.Key]*types.SlimCRP),
 
 		toServicesPolicies: make(map[resource.Key]struct{}),
 		cnpByServiceID:     make(map[k8s.ServiceID]map[resource.Key]struct{}),
@@ -116,7 +121,7 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 	}
 
 	// Service notifications are not used if CNPs/CCNPs are disabled.
-	if params.Config.EnableCiliumNetworkPolicy || params.Config.EnableCiliumClusterwideNetworkPolicy {
+	if params.Config.EnableCiliumNetworkPolicy || params.Config.EnableCiliumClusterwideNetworkPolicy && !params.Config.EnableCentralizedNetworkPolicy {
 		p.svcCacheNotifications = serviceNotificationsQueue(ctx, params.ServiceCache.Notifications())
 	}
 
@@ -133,29 +138,50 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 		},
 	})
 
-	if params.Config.EnableK8sNetworkPolicy {
-		p.knpSyncPending.Store(1)
-		p.registerResourceWithSyncFn(ctx, k8sAPIGroupNetworkingV1Core, func() bool {
-			return p.knpSyncPending.Load() == 0
+	// If centralized network policy is enabled, only watch CiliumResolvedPolicy.
+	// Otherwise, watch the individual policy types.
+	if params.Config.EnableCentralizedNetworkPolicy {
+		p.crpSyncPending.Store(1)
+		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumResolvedPolicyV2Alpha1, func() bool {
+			if p.crpSyncPending.Load() != 0 {
+				params.Logger.Info("CiliumResolvedPolicy watcher sync function called+++++++, pending sync count: ", p.crpSyncPending.Load())
+			} else {
+				params.Logger.Info("CiliumResolvedPolicy watcher sync function returning true+++++++")
+			}
+			return p.crpSyncPending.Load() == 0
 		})
-	}
-	if params.Config.EnableCiliumNetworkPolicy {
-		p.cnpSyncPending.Store(1)
-		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumNetworkPolicyV2, func() bool {
-			return p.cnpSyncPending.Load() == 0 && p.cidrGroupSynced.Load()
-		})
-	}
+	} else {
+		if params.Config.EnableK8sNetworkPolicy {
+			p.knpSyncPending.Store(1)
+			p.registerResourceWithSyncFn(ctx, k8sAPIGroupNetworkingV1Core, func() bool {
+				return p.knpSyncPending.Load() == 0
+			})
+		}
+		if params.Config.EnableCiliumNetworkPolicy {
+			params.Logger.Info("CiliumNetworkPolicy enabled, starting watcher +++++++++++++++++++++++++")
+			p.cnpSyncPending.Store(1)
+			p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumNetworkPolicyV2, func() bool {
+				params.Logger.Info("CiliumNetworkPolicy watcher sync function called+++++++")
+				if p.cnpSyncPending.Load() == 0 {
+					params.Logger.Info("CiliumNetworkPolicy watcher sync function returning true+++++++")
+				} else {
+					params.Logger.Info("CiliumNetworkPolicy watcher sync function returning false+++++++", p.cnpSyncPending.Load())
+				}
+				return p.cnpSyncPending.Load() == 0 && p.cidrGroupSynced.Load()
+			})
+		}
 
-	if params.Config.EnableCiliumClusterwideNetworkPolicy {
-		p.ccnpSyncPending.Store(1)
-		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, func() bool {
-			return p.ccnpSyncPending.Load() == 0 && p.cidrGroupSynced.Load()
-		})
-	}
+		if params.Config.EnableCiliumClusterwideNetworkPolicy {
+			p.ccnpSyncPending.Store(1)
+			p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, func() bool {
+				return p.ccnpSyncPending.Load() == 0 && p.cidrGroupSynced.Load()
+			})
+		}
 
-	if params.Config.EnableCiliumNetworkPolicy || params.Config.EnableCiliumClusterwideNetworkPolicy {
-		p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumCIDRGroupV2, func() bool {
-			return p.cidrGroupSynced.Load()
-		})
+		if params.Config.EnableCiliumNetworkPolicy || params.Config.EnableCiliumClusterwideNetworkPolicy {
+			p.registerResourceWithSyncFn(ctx, k8sAPIGroupCiliumCIDRGroupV2, func() bool {
+				return p.cidrGroupSynced.Load()
+			})
+		}
 	}
 }

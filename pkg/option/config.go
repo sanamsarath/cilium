@@ -2548,6 +2548,11 @@ func (c *DaemonConfig) K8sNetworkPolicyEnabled() bool {
 	return c.EnableK8sNetworkPolicy
 }
 
+// CentralizedNetworkPolicyEnabled returns true if centralized network policy is enabled, false otherwise.
+func (c *DaemonConfig) CentralizedNetworkPolicyEnabled() bool {
+	return c.EnableCentralizedNetworkPolicy
+}
+
 func (c *DaemonConfig) PolicyCIDRMatchesNodes() bool {
 	return slices.Contains(c.PolicyCIDRMatchMode, "nodes")
 }
