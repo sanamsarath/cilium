@@ -1013,6 +1013,9 @@ func InitGlobalFlags(cmd *cobra.Command, vp *viper.Viper) {
 	flags.StringSlice(option.PolicyCIDRMatchMode, defaults.PolicyCIDRMatchMode, "The entities that can be selected by CIDR policy. Supported values: 'nodes'")
 	option.BindEnv(vp, option.PolicyCIDRMatchMode)
 
+	flags.Bool(option.EnableCentralizedNetworkPolicy, defaults.EnableCentralizedNetworkPolicy, "Enable Centralized Network Policy Controller")
+	option.BindEnv(vp, option.EnableCentralizedNetworkPolicy)
+
 	flags.Duration(option.MaxInternalTimerDelay, defaults.MaxInternalTimerDelay, "Maximum internal timer value across the entire agent. Use in test environments to detect race conditions in agent logic.")
 	flags.MarkHidden(option.MaxInternalTimerDelay)
 	option.BindEnv(vp, option.MaxInternalTimerDelay)

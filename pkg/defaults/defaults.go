@@ -534,6 +534,9 @@ const (
 	// Network Policy.
 	EnableCiliumClusterwideNetworkPolicy = true
 
+	// EnableCentralizedNetworkPolicy enables support for Centralized Network Policy.
+	EnableCentralizedNetworkPolicy = false
+
 	// MaxConnectedClusters sets the maximum number of clusters that can be
 	// connected in a clustermesh.
 	// The value is used to determine the bit allocation for cluster ID and

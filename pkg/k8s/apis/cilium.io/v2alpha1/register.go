@@ -111,6 +111,11 @@ const (
 	CGCCListName       = "ciliumgatewayclassconfiglists"
 	CGCCKindDefinition = "CiliumGatewayClassConfig"
 	CGCCName           = CGCCPluralName + "." + CustomResourceDefinitionGroup
+
+	// CiliumResolvedPolicy (CRP)
+	CRPPluralName     = "ciliumresolvedpolicies"
+	CRPKindDefinition = "CiliumResolvedPolicy"
+	CRPName           = CRPPluralName + "." + CustomResourceDefinitionGroup
 )
 
 // SchemeGroupVersion is group version used to register these objects

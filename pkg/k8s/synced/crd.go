@@ -86,6 +86,10 @@ func agentCRDResourceNames() []string {
 		result = append(result, CRDResourceName(v2.BGPNCOName))
 	}
 
+	if option.Config.EnableCentralizedNetworkPolicy {
+		result = append(result, CRDResourceName(v2alpha1.CRPName))
+	}
+
 	result = append(result,
 		CRDResourceName(v2alpha1.LBIPPoolName),
 		CRDResourceName(v2alpha1.L2AnnouncementName),
