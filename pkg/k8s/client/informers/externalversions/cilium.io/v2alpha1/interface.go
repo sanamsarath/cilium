@@ -119,5 +119,5 @@ func (v *version) CiliumPodIPPools() CiliumPodIPPoolInformer {
 
 // CiliumResolvedPolicies returns a CiliumResolvedPolicyInformer.
 func (v *version) CiliumResolvedPolicies() CiliumResolvedPolicyInformer {
-	return &ciliumResolvedPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+	return &ciliumResolvedPolicyInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

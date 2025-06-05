@@ -1,7 +1,6 @@
 package k8s
 
 import (
-	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -23,15 +22,15 @@ func (p *policyWatcher) onUpsertCRP(
 	}()
 
 	// If CRP status is not Synced, we do not process it.
-	if crp.Status.SyncState != v2alpha1.SyncStateSynced {
-		p.log.Debug(
-			"CRPUpsert: Skipping CiliumResolvedPolicy update as status is not Synced",
-			logfields.K8sAPIVersion, crp.TypeMeta.APIVersion,
-			logfields.Name, crp.ObjectMeta.Name,
-			logfields.Status, crp.Status,
-		)
-		return nil
-	}
+	// if crp.Status.SyncState != v2alpha1.SyncStateSynced {
+	// 	p.log.Debug(
+	// 		"CRPUpsert: Skipping CiliumResolvedPolicy update as status is not Synced",
+	// 		logfields.K8sAPIVersion, crp.TypeMeta.APIVersion,
+	// 		logfields.Name, crp.ObjectMeta.Name,
+	// 		logfields.Status, crp.Status,
+	// 	)
+	// 	return nil
+	// }
 
 	// Check if the CiliumResolvedPolicy has changed.
 	oldCRP, ok := p.crpCache[key]

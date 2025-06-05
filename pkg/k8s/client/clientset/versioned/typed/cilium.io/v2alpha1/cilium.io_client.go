@@ -88,8 +88,8 @@ func (c *CiliumV2alpha1Client) CiliumPodIPPools() CiliumPodIPPoolInterface {
 	return newCiliumPodIPPools(c)
 }
 
-func (c *CiliumV2alpha1Client) CiliumResolvedPolicies(namespace string) CiliumResolvedPolicyInterface {
-	return newCiliumResolvedPolicies(c, namespace)
+func (c *CiliumV2alpha1Client) CiliumResolvedPolicies() CiliumResolvedPolicyInterface {
+	return newCiliumResolvedPolicies(c)
 }
 
 // NewForConfig creates a new CiliumV2alpha1Client for the given config.

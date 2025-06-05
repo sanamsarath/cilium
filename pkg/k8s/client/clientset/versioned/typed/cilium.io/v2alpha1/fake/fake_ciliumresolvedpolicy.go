@@ -17,11 +17,11 @@ type fakeCiliumResolvedPolicies struct {
 	Fake *FakeCiliumV2alpha1
 }
 
-func newFakeCiliumResolvedPolicies(fake *FakeCiliumV2alpha1, namespace string) ciliumiov2alpha1.CiliumResolvedPolicyInterface {
+func newFakeCiliumResolvedPolicies(fake *FakeCiliumV2alpha1) ciliumiov2alpha1.CiliumResolvedPolicyInterface {
 	return &fakeCiliumResolvedPolicies{
 		gentype.NewFakeClientWithList[*v2alpha1.CiliumResolvedPolicy, *v2alpha1.CiliumResolvedPolicyList](
 			fake.Fake,
-			namespace,
+			"",
 			v2alpha1.SchemeGroupVersion.WithResource("ciliumresolvedpolicies"),
 			v2alpha1.SchemeGroupVersion.WithKind("CiliumResolvedPolicy"),
 			func() *v2alpha1.CiliumResolvedPolicy { return &v2alpha1.CiliumResolvedPolicy{} },

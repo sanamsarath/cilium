@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	daemonOption "github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -121,9 +122,19 @@ func (p *policyContext) DefaultDenyIngress() bool {
 	return p.defaultDenyIngress
 }
 
+// SetDefaultDenyIngress sets the default deny for ingress
+func (p *policyContext) SetDefaultDenyIngress(deny bool) {
+	p.defaultDenyIngress = deny
+}
+
 // DefaultDenyEgress returns true if default deny is enabled for egress
 func (p *policyContext) DefaultDenyEgress() bool {
 	return p.defaultDenyEgress
+}
+
+// SetDefaultDenyEgress sets the default deny for egress
+func (p *policyContext) SetDefaultDenyEgress(deny bool) {
+	p.defaultDenyEgress = deny
 }
 
 func (p *policyContext) GetLogger() *slog.Logger {
@@ -502,6 +513,7 @@ func (l4policy L4DirectionPolicy) toMapState(logger *slog.Logger, p *EndpointPol
 type PerSelectorPolicyTuple struct {
 	Policy   *PerSelectorPolicy
 	Selector CachedSelector
+	idset    string
 }
 
 // RedirectFilters returns an iterator for each L4Filter with a redirect in the policy.
@@ -516,9 +528,17 @@ func (p *selectorPolicy) RedirectFilters() iter.Seq2[*L4Filter, PerSelectorPolic
 func (l4policy L4DirectionPolicy) forEachRedirectFilter(yield func(*L4Filter, PerSelectorPolicyTuple) bool) bool {
 	ok := true
 	l4policy.PortRules.ForEach(func(l4 *L4Filter) bool {
-		for cs, ps := range l4.PerSelectorPolicies {
-			if ps != nil && ps.IsRedirect() {
-				ok = yield(l4, PerSelectorPolicyTuple{ps, cs})
+		if daemonOption.Config.EnableCentralizedNetworkPolicy {
+			for idset, ps := range l4.PerIdentityPolicies {
+				if ps != nil && ps.IsRedirect() {
+					ok = yield(l4, PerSelectorPolicyTuple{ps, nil, idset})
+				}
+			}
+		} else {
+			for cs, ps := range l4.PerSelectorPolicies {
+				if ps != nil && ps.IsRedirect() {
+					ok = yield(l4, PerSelectorPolicyTuple{ps, cs, ""})
+				}
 			}
 		}
 		return ok

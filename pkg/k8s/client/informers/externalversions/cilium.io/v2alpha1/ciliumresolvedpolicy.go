@@ -29,45 +29,44 @@ type CiliumResolvedPolicyInformer interface {
 type ciliumResolvedPolicyInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
-	namespace        string
 }
 
 // NewCiliumResolvedPolicyInformer constructs a new informer for CiliumResolvedPolicy type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewCiliumResolvedPolicyInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredCiliumResolvedPolicyInformer(client, namespace, resyncPeriod, indexers, nil)
+func NewCiliumResolvedPolicyInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
+	return NewFilteredCiliumResolvedPolicyInformer(client, resyncPeriod, indexers, nil)
 }
 
 // NewFilteredCiliumResolvedPolicyInformer constructs a new informer for CiliumResolvedPolicy type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewFilteredCiliumResolvedPolicyInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
+func NewFilteredCiliumResolvedPolicyInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.CiliumV2alpha1().CiliumResolvedPolicies(namespace).List(context.Background(), options)
+				return client.CiliumV2alpha1().CiliumResolvedPolicies().List(context.Background(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.CiliumV2alpha1().CiliumResolvedPolicies(namespace).Watch(context.Background(), options)
+				return client.CiliumV2alpha1().CiliumResolvedPolicies().Watch(context.Background(), options)
 			},
 			ListWithContextFunc: func(ctx context.Context, options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.CiliumV2alpha1().CiliumResolvedPolicies(namespace).List(ctx, options)
+				return client.CiliumV2alpha1().CiliumResolvedPolicies().List(ctx, options)
 			},
 			WatchFuncWithContext: func(ctx context.Context, options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.CiliumV2alpha1().CiliumResolvedPolicies(namespace).Watch(ctx, options)
+				return client.CiliumV2alpha1().CiliumResolvedPolicies().Watch(ctx, options)
 			},
 		},
 		&apisciliumiov2alpha1.CiliumResolvedPolicy{},
@@ -77,7 +76,7 @@ func NewFilteredCiliumResolvedPolicyInformer(client versioned.Interface, namespa
 }
 
 func (f *ciliumResolvedPolicyInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredCiliumResolvedPolicyInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+	return NewFilteredCiliumResolvedPolicyInformer(client, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
 func (f *ciliumResolvedPolicyInformer) Informer() cache.SharedIndexInformer {

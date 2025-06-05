@@ -19,7 +19,7 @@ import (
 // CiliumResolvedPoliciesGetter has a method to return a CiliumResolvedPolicyInterface.
 // A group's client should implement this interface.
 type CiliumResolvedPoliciesGetter interface {
-	CiliumResolvedPolicies(namespace string) CiliumResolvedPolicyInterface
+	CiliumResolvedPolicies() CiliumResolvedPolicyInterface
 }
 
 // CiliumResolvedPolicyInterface has methods to work with CiliumResolvedPolicy resources.
@@ -43,13 +43,13 @@ type ciliumResolvedPolicies struct {
 }
 
 // newCiliumResolvedPolicies returns a CiliumResolvedPolicies
-func newCiliumResolvedPolicies(c *CiliumV2alpha1Client, namespace string) *ciliumResolvedPolicies {
+func newCiliumResolvedPolicies(c *CiliumV2alpha1Client) *ciliumResolvedPolicies {
 	return &ciliumResolvedPolicies{
 		gentype.NewClientWithList[*ciliumiov2alpha1.CiliumResolvedPolicy, *ciliumiov2alpha1.CiliumResolvedPolicyList](
 			"ciliumresolvedpolicies",
 			c.RESTClient(),
 			scheme.ParameterCodec,
-			namespace,
+			"",
 			func() *ciliumiov2alpha1.CiliumResolvedPolicy { return &ciliumiov2alpha1.CiliumResolvedPolicy{} },
 			func() *ciliumiov2alpha1.CiliumResolvedPolicyList { return &ciliumiov2alpha1.CiliumResolvedPolicyList{} },
 		),

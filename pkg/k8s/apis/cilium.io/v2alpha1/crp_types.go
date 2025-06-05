@@ -13,6 +13,7 @@ import (
 // Important: Run "make" to regenerate code after modifying this file
 
 //+genclient
+//+genclient:nonNamespaced
 //+k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 //+kubebuilder:resource:categories={cilium},singular="ciliumresolvedpolicy",path="ciliumresolvedpolicies",scope="Cluster",shortName={crp}
 //+kubebuilder:object:root=true

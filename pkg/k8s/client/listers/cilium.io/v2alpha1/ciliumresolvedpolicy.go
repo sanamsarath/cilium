@@ -18,8 +18,9 @@ type CiliumResolvedPolicyLister interface {
 	// List lists all CiliumResolvedPolicies in the indexer.
 	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*ciliumiov2alpha1.CiliumResolvedPolicy, err error)
-	// CiliumResolvedPolicies returns an object that can list and get CiliumResolvedPolicies.
-	CiliumResolvedPolicies(namespace string) CiliumResolvedPolicyNamespaceLister
+	// Get retrieves the CiliumResolvedPolicy from the index for a given name.
+	// Objects returned here must be treated as read-only.
+	Get(name string) (*ciliumiov2alpha1.CiliumResolvedPolicy, error)
 	CiliumResolvedPolicyListerExpansion
 }
 
@@ -31,27 +32,4 @@ type ciliumResolvedPolicyLister struct {
 // NewCiliumResolvedPolicyLister returns a new CiliumResolvedPolicyLister.
 func NewCiliumResolvedPolicyLister(indexer cache.Indexer) CiliumResolvedPolicyLister {
 	return &ciliumResolvedPolicyLister{listers.New[*ciliumiov2alpha1.CiliumResolvedPolicy](indexer, ciliumiov2alpha1.Resource("ciliumresolvedpolicy"))}
-}
-
-// CiliumResolvedPolicies returns an object that can list and get CiliumResolvedPolicies.
-func (s *ciliumResolvedPolicyLister) CiliumResolvedPolicies(namespace string) CiliumResolvedPolicyNamespaceLister {
-	return ciliumResolvedPolicyNamespaceLister{listers.NewNamespaced[*ciliumiov2alpha1.CiliumResolvedPolicy](s.ResourceIndexer, namespace)}
-}
-
-// CiliumResolvedPolicyNamespaceLister helps list and get CiliumResolvedPolicies.
-// All objects returned here must be treated as read-only.
-type CiliumResolvedPolicyNamespaceLister interface {
-	// List lists all CiliumResolvedPolicies in the indexer for a given namespace.
-	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*ciliumiov2alpha1.CiliumResolvedPolicy, err error)
-	// Get retrieves the CiliumResolvedPolicy from the indexer for a given namespace and name.
-	// Objects returned here must be treated as read-only.
-	Get(name string) (*ciliumiov2alpha1.CiliumResolvedPolicy, error)
-	CiliumResolvedPolicyNamespaceListerExpansion
-}
-
-// ciliumResolvedPolicyNamespaceLister implements the CiliumResolvedPolicyNamespaceLister
-// interface.
-type ciliumResolvedPolicyNamespaceLister struct {
-	listers.ResourceIndexer[*ciliumiov2alpha1.CiliumResolvedPolicy]
 }

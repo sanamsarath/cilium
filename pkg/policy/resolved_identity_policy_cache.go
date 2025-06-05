@@ -9,8 +9,13 @@ import (
 	"log/slog"
 
 	"github.com/cilium/cilium/pkg/container/set"
+	"github.com/cilium/cilium/pkg/identity"
 	identityPkg "github.com/cilium/cilium/pkg/identity"
+	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 type resolvedIdentityPolicyCache struct {
@@ -116,4 +121,91 @@ func (ips *IdentityPolicyState) deleteResolvedPolicy(sourceUID string) {
 	ips.Lock()
 	defer ips.Unlock()
 	delete(ips.MatchingCRPUIDset, sourceUID)
+}
+
+// updateSelectorPolicy resolves the policy for the security identity of the
+// specified endpoint and stores it internally. It will skip policy resolution
+// if the cached policy is already at the revision specified in the repo.
+// endpointID
+//
+// Returns whether the cache was updated, or an error.
+func (cache *resolvedIdentityPolicyCache) updateSelectorPolicy(identity *identityPkg.Identity) (*selectorPolicy, bool, error) {
+	ips := cache.lookupOrCreateIdentityPolicyState(identity.ID)
+
+	// Lock the 'ips' for the duration of the revision check and
+	// the possible policy update.
+	ips.Lock()
+	defer ips.Unlock()
+
+	// repo revision
+	rev := cache.repo.GetRevision()
+	// Don't resolve policy if it was already done for this or later revision.
+	if selPolicy := ips.getPolicy(); selPolicy != nil && selPolicy.Revision >= rev {
+		return selPolicy, false, nil
+	}
+
+	// Resolve the policies, which could fail
+	selPolicy, err := ips.resolvePolicyLocked(identity, rev, cache.repo)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Set the computed policy in the IdentityPolicyState
+	ips.ComputedPolicy = selPolicy
+
+	// set revision in the selectorPolicy
+	selPolicy.Revision = rev
+
+	return selPolicy, true, nil
+}
+
+func (ips *IdentityPolicyState) resolvePolicyLocked(securityIdentity *identity.Identity, rev uint64, repo *Repository) (*selectorPolicy, error) {
+	calculatedPolicy := &selectorPolicy{
+		Revision:      rev,
+		SelectorCache: repo.GetSelectorCache(), // passing this to satisfy selctorPolicy attach and detach called by callers(like Endpoints)
+		L4Policy:      NewL4Policy(rev),
+	}
+
+	policyCtx := policyContext{
+		repo:               repo,
+		ns:                 securityIdentity.LabelArray.Get(labels.LabelSourceK8sKeyPrefix + k8sConst.PodNamespaceLabel),
+		defaultDenyIngress: false, // controller is expected to handle this?? otherwise we can fix it here
+		defaultDenyEgress:  false, // controller is expected to handle this?? otherwise we can fix it here
+		traceEnabled:       option.Config.TracingEnabled(),
+		logger:             repo.logger.With(logfields.Identity, securityIdentity.ID),
+	}
+
+	newL4IngressPolicy, ingressExists, err := ips.MatchingCRPUIDset.resolveL4IngressPolicy(&policyCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	newL4EgressPolicy, egressExists, err := ips.MatchingCRPUIDset.resolveL4EgressPolicy(&policyCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the L4 policies in the calculated policy
+	if newL4IngressPolicy != nil {
+		calculatedPolicy.L4Policy.Ingress.PortRules = newL4IngressPolicy
+	}
+
+	if ingressExists {
+		calculatedPolicy.IngressPolicyEnabled = true
+	}
+
+	if newL4EgressPolicy != nil {
+		calculatedPolicy.L4Policy.Egress.PortRules = newL4EgressPolicy
+	}
+
+	if egressExists {
+		calculatedPolicy.EgressPolicyEnabled = true
+	}
+
+	// Attach doesn't do much in centralized mode, as we don't listen on increamental updates
+	// from the L4 Filters but calculates redirect features from all the all L4 filters and
+	// update the L4Policy in the selectorPolicy.
+	calculatedPolicy.Attach(&policyCtx)
+
+	return calculatedPolicy, nil
 }

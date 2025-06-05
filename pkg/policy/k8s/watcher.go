@@ -276,7 +276,6 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 				reportCNPChangeMetrics(err)
 				event.Done(err)
 			case event, ok := <-crpEvents:
-				p.log.Debug("CRP event received", logfields.K8sAPIVersion, event.Object.TypeMeta.APIVersion, logfields.Name, event.Object.ObjectMeta.Name)
 				if !ok {
 					p.log.Info("CRP events channel closed, stopping processing CRP events")
 					crpEvents = nil

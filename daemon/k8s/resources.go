@@ -44,6 +44,7 @@ var (
 			k8s.CiliumEndpointSliceResource,
 			k8s.CiliumEnvoyConfigResource,
 			k8s.CiliumClusterwideEnvoyConfigResource,
+			k8s.CiliumResolvedPolicyResource,
 		),
 	)
 
