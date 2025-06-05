@@ -1270,6 +1270,9 @@ const (
 	// IdentityManagementModeBoth means cilium-agent and cilium-operator both manage identities
 	// (used only during migration between "agent" and "operator").
 	IdentityManagementModeBoth = "both"
+
+	// IdentityManagementModePolicyController means cilium-policy-controller is solely responsible for managing CiliumIdentity.
+	IdentityManagementModePolicyController = "policy-controller"
 )
 
 // getEnvName returns the environment variable to be used for the given option name.
