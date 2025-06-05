@@ -27,13 +27,15 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
 	serviceStore "github.com/cilium/cilium/pkg/service/store"
 )
 
 type fakePolicyImporter struct {
-	OnUpdatePolicy func(upd *policytypes.PolicyUpdate)
+	OnUpdatePolicy         func(upd *policytypes.PolicyUpdate)
+	OnUpdateResolvedPolicy func(upd *policy.ResolvedIdentityPolicyUpdate)
 }
 
 func (f *fakePolicyImporter) UpdatePolicy(upd *policytypes.PolicyUpdate) {
@@ -41,6 +43,14 @@ func (f *fakePolicyImporter) UpdatePolicy(upd *policytypes.PolicyUpdate) {
 		f.OnUpdatePolicy(upd)
 	} else {
 		panic("OnUpdatePolicy(upd *policytypes.PolicyUpdate) was called but was not set")
+	}
+}
+
+func (f *fakePolicyImporter) UpdateResolvedIdentityPolicy(upd *policy.ResolvedIdentityPolicyUpdate) {
+	if f.OnUpdateResolvedPolicy != nil {
+		f.OnUpdateResolvedPolicy(upd)
+	} else {
+		return
 	}
 }
 

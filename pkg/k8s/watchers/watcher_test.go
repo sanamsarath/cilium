@@ -25,6 +25,10 @@ func (f *fakeK8sWatcherConfiguration) KVstoreEnabled() bool {
 	return false
 }
 
+func (f *fakeK8sWatcherConfiguration) CentralizedNetworkPolicyEnabled() bool {
+	return false
+}
+
 func Test_No_Resources_InitK8sSubsystem(t *testing.T) {
 	logger := hivetest.Logger(t)
 	fakeClientSet, _ := client.NewFakeClientset(logger)

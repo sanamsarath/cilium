@@ -115,6 +115,7 @@ cilium-agent [flags]
       --enable-bpf-clock-probe                                    Enable BPF clock source probing for more efficient tick retrieval
       --enable-bpf-masquerade                                     Masquerade packets from endpoints leaving the host with BPF instead of iptables
       --enable-bpf-tproxy                                         Enable BPF-based proxy redirection (beta), if support available
+      --enable-centralized-network-policy                         Enable Centralized Network Policy Controller
       --enable-cilium-api-server-access strings                   List of cilium API APIs which are administratively enabled. Supports '*'. (default [*])
       --enable-cilium-endpoint-slice                              Enable the CiliumEndpointSlice watcher in place of the CiliumEndpoint watcher (beta)
       --enable-cilium-health-api-server-access strings            List of cilium health API APIs which are administratively enabled. Supports '*'. (default [*])

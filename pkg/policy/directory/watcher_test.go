@@ -9,6 +9,7 @@ import (
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/pkg/policy"
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
 )
 
@@ -66,6 +67,10 @@ func (p *policyMananger) UpdatePolicy(u *policytypes.PolicyUpdate) {
 	if u.DoneChan != nil {
 		u.DoneChan <- 42
 	}
+}
+
+func (p *policyMananger) UpdateResolvedIdentityPolicy(u *policy.ResolvedIdentityPolicyUpdate) {
+	// No-op for this test
 }
 
 func TestTranslateToCNPObject(t *testing.T) {

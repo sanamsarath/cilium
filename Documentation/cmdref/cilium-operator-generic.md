@@ -36,6 +36,7 @@ cilium-operator-generic [flags]
   -D, --debug                                                Enable debugging mode
       --default-lb-service-ipam string                       Indicates the default LoadBalancer Service IPAM when no LoadBalancer class is set.Applicable values: lbipam, nodeipam, none (default "lbipam")
       --double-write-metric-reporter-interval duration       Refresh interval for the Double Write Metric Reporter (default 1m0s)
+      --enable-centralized-network-policy                    Enable Centralized Network Policy Controller
       --enable-cilium-endpoint-slice                         If set to true, the CiliumEndpointSlice feature is enabled. If any CiliumEndpoints resources are created, updated, or deleted in the cluster, all those changes are broadcast as CiliumEndpointSlice updates to all of the Cilium agents.
       --enable-cilium-operator-server-access strings         List of cilium operator APIs which are administratively enabled. Supports '*'. (default [*])
       --enable-gateway-api-alpn                              Enables exposing ALPN with HTTP2 and HTTP/1.1 support for Gateway API
