@@ -51,6 +51,10 @@ type PolicyRepository interface {
 	Iterate(f func(rule *api.Rule))
 	ReplaceByResource(rules api.Rules, resource ipcachetypes.ResourceID) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, oldRevCnt int)
 	ReplaceByLabels(rules api.Rules, searchLabelsList []labels.LabelArray) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64, oldRevCnt int)
+	// inserts a resolved policy into repository, and returns the set of affected identities
+	InsertResolvedPolicy(rp *ResolvedPolicy) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64)
+	// Deletes a resolved policy from the repository, and returns the set of affected identities
+	DeleteResolvedPolicy(rp *ResolvedPolicy) (affectedIDs *set.Set[identity.NumericIdentity], rev uint64)
 	Search(lbls labels.LabelArray) (api.Rules, uint64)
 }
 
@@ -86,6 +90,9 @@ type Repository struct {
 
 	// PolicyCache tracks the selector policies created from this repo
 	policyCache *policyCache
+
+	// ResolvedIdentityPolicyCache tracks the resolved policies for identities
+	resolvedIdentityPolicyCache *resolvedIdentityPolicyCache
 
 	certManager certificatemanager.CertificateManager
 
@@ -129,6 +136,7 @@ func NewPolicyRepository(
 	}
 	repo.revision.Store(1)
 	repo.policyCache = newPolicyCache(repo, idmgr)
+	repo.resolvedIdentityPolicyCache = newresolvedIdentityPolicyCache(repo)
 	return repo
 }
 
@@ -591,6 +599,26 @@ func (p *Repository) ReplaceByLabels(rules api.Rules, searchLabelsList []labels.
 	}
 
 	return affectedIDs, p.BumpRevision(), len(oldRules)
+}
+
+// InsertResolvedPolicy inserts a ResolvedPolicy into the resolved identity policy cache
+// and returns the set of affected identities and the new repository revision.
+func (p *Repository) InsertResolvedPolicy(rp *ResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64) {
+	affectedIds := p.resolvedIdentityPolicyCache.UpdateResolvedPolicy(rp)
+	newPolicyRev := p.BumpRevision()
+	return affectedIds, newPolicyRev
+}
+
+// DeleteResolvedPolicy deletes a ResolvedPolicy from the resolved identity policy cache
+func (p *Repository) DeleteResolvedPolicy(rp *ResolvedPolicy) (*set.Set[identity.NumericIdentity], uint64) {
+	affectedIdentities := p.resolvedIdentityPolicyCache.DeleteResolvedPolicy(rp)
+	newPolicyRev := p.BumpRevision()
+	return affectedIdentities, newPolicyRev
+}
+
+// GetResolvedIdentityPolicyCache returns the cache of resolved identity policies
+func (p *Repository) GetResolvedIdentityPolicyCache() *resolvedIdentityPolicyCache {
+	return p.resolvedIdentityPolicyCache
 }
 
 // GetPolicySnapshot returns a map of all the SelectorPolicies in the repository.

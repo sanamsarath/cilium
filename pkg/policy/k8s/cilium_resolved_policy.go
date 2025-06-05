@@ -69,7 +69,6 @@ func (p *policyWatcher) onUpsertCRP(
 	upd := &policy.ResolvedIdentityPolicyUpdate{
 		ProcessingStartTime: initialRecvTime,
 		ResolvedPolicy:      resolvedPolicy,
-		Uid:                 string(crp.UID),
 		DoneChan:            dc,
 		Operation:           policy.ResolvedIdentityPolicyUpsert,
 	}
@@ -127,7 +126,6 @@ func (p *policyWatcher) onDeleteCRP(
 	upd := &policy.ResolvedIdentityPolicyUpdate{
 		ProcessingStartTime: intialRecvTime,
 		ResolvedPolicy:      resolvedPolicy,
-		Uid:                 string(oldCRP.UID),
 		DoneChan:            dc,
 		Operation:           policy.ResolvedIdentityPolicyDelete,
 	}

@@ -431,7 +431,60 @@ func (i *policyImporter) processCRPUpdates(ctx context.Context, updates []*polic
 		return nil
 	}
 
-	// TODO: Process the updates in batches.
+	i.log.Info("Processing CRP updates", logfields.Count, len(updates))
+
+	// Process each resolved policy to update the repository
+	idsToRegen := &set.Set[identity.NumericIdentity]{}
+	startRevision := i.repo.GetRevision()
+	endRevision := startRevision
+
+	for _, update := range updates {
+		var affectedIdentities *set.Set[identity.NumericIdentity]
+		var newRevision uint64
+
+		switch update.Operation {
+		case policy.ResolvedIdentityPolicyUpsert:
+			// Insert SubjectPolicyState entries into the repository
+			affectedIdentities, newRevision = i.repo.InsertResolvedPolicy(update.ResolvedPolicy)
+
+			i.log.Debug("Processed resolved policy upsert",
+				logfields.CiliumNetworkPolicyName, update.ResolvedPolicy.SourcePolicyUID,
+				logfields.PolicyRevision, newRevision,
+				logfields.Identity, slices.Collect(truncate(affectedIdentities.Members(), 100)))
+
+		case policy.ResolvedIdentityPolicyDelete:
+			// Delete the resolved policy from the repository
+			affectedIdentities, newRevision = i.repo.DeleteResolvedPolicy(update.ResolvedPolicy)
+
+			i.log.Debug("Processed resolved policy delete",
+				logfields.CiliumNetworkPolicyName, update.ResolvedPolicy.SourcePolicyUID,
+				logfields.PolicyRevision, newRevision,
+				logfields.Identity, slices.Collect(truncate(affectedIdentities.Members(), 100)))
+
+		default:
+			i.log.Error("Unknown resolved policy operation",
+				"operation", update.Operation.String(),
+				logfields.CiliumNetworkPolicyName, update.ResolvedPolicy.SourcePolicyUID)
+			continue
+		}
+
+		endRevision = newRevision
+		idsToRegen.Merge(*affectedIdentities)
+
+		// Report that the policy has been processed
+		if update.DoneChan != nil {
+			update.DoneChan <- endRevision
+		}
+
+		// TODO: Send monitor notification for resolved policy update
+	}
+
+	// All resolved policy updates have been applied; regenerate all affected endpoints
+	i.log.Info("resolved policy updates in repository complete, triggering endpoint updates",
+		logfields.PolicyRevision, endRevision)
+	if i.epm != nil {
+		i.epm.UpdatePolicy(idsToRegen, startRevision, endRevision)
+	}
 	return nil
 }
 

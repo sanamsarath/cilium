@@ -187,9 +187,6 @@ type ResolvedIdentityPolicyUpdate struct {
 	// ResolvedPolicy is the resolved identity policy to be applied.
 	ResolvedPolicy *ResolvedPolicy
 
-	// UID is the unique identifier for the policy update
-	Uid string
-
 	// DoneChan, if not nil, will have a single value emitted: the revision of the
 	// policy repository when the update has been processed.
 	// Thus must be a buffered channel!
