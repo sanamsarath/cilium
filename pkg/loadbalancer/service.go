@@ -6,6 +6,7 @@ package loadbalancer
 import (
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"sort"
 	"strconv"
@@ -13,10 +14,8 @@ import (
 
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/index"
-	"github.com/cilium/statedb/part"
 
 	"github.com/cilium/cilium/pkg/annotation"
-	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
@@ -55,8 +54,20 @@ type Service struct {
 	// If set to "Local", only node-local backends are chosen.
 	IntTrafficPolicy SVCTrafficPolicy
 
-	SessionAffinity        bool
+	// ForwardingMode controls whether DSR or SNAT should be used for the dispatch
+	// to the backend. If undefined the default mode is used (--bpf-lb-mode).
+	ForwardingMode SVCForwardingMode
+
+	// SessionAffinity if true will enable the client IP based session affinity.
+	SessionAffinity bool
+
+	// SessionAffinityTimeout is the duration of inactivity before the session
+	// affinity is cleared for a specific client IP.
 	SessionAffinityTimeout time.Duration
+
+	// LoadBalancerClass if set specifies the load-balancer class to be used
+	// for a LoadBalancer service. If unset the default implementation is used.
+	LoadBalancerClass *string
 
 	// ProxyRedirect if non-nil redirects the traffic going to the frontends
 	// towards a locally running proxy.
@@ -74,7 +85,7 @@ type Service struct {
 
 	// SourceRanges if non-empty will restrict access to the service to the specified
 	// client addresses.
-	SourceRanges []cidr.CIDR
+	SourceRanges []netip.Prefix
 
 	// PortNames maps a port name to a port number.
 	PortNames map[string]uint16
@@ -82,10 +93,6 @@ type Service struct {
 	// TrafficDistribution if not default will influence how backends are chosen for
 	// frontends associated with this service.
 	TrafficDistribution TrafficDistribution
-
-	// Properties are additional untyped properties that can carry feature
-	// specific metadata about the service.
-	Properties part.Map[string, any]
 }
 
 type TrafficDistribution string
@@ -101,6 +108,25 @@ const (
 
 func (svc *Service) GetLBAlgorithmAnnotation() SVCLoadBalancingAlgorithm {
 	return ToSVCLoadBalancingAlgorithm(svc.Annotations[annotation.ServiceLoadBalancingAlgorithm])
+}
+
+func (svc *Service) GetProxyDelegation() SVCProxyDelegation {
+	if value, ok := annotation.Get(svc, annotation.ServiceProxyDelegation); ok {
+		tmp := SVCProxyDelegation(strings.ToLower(value))
+		if tmp == SVCProxyDelegationDelegateIfLocal {
+			return tmp
+		}
+	}
+	return SVCProxyDelegationNone
+}
+
+func (svc *Service) GetSourceRangesPolicy() SVCSourceRangesPolicy {
+	if value, ok := annotation.Get(svc, annotation.ServiceSourceRangesPolicy); ok {
+		if SVCSourceRangesPolicy(strings.ToLower(value)) == SVCSourceRangesPolicyDeny {
+			return SVCSourceRangesPolicyDeny
+		}
+	}
+	return SVCSourceRangesPolicyAllow
 }
 
 func (svc *Service) GetAnnotations() map[string]string {
@@ -185,6 +211,10 @@ func (svc *Service) TableRow() []string {
 		flags = append(flags, "SourceRanges="+strings.Join(ss, ", "))
 	}
 
+	if p := svc.GetSourceRangesPolicy(); p == SVCSourceRangesPolicyDeny {
+		flags = append(flags, "SourceRangesPolicy=deny")
+	}
+
 	if svc.ProxyRedirect != nil {
 		flags = append(flags, "ProxyRedirect="+svc.ProxyRedirect.String())
 	}
@@ -201,17 +231,16 @@ func (svc *Service) TableRow() []string {
 		flags = append(flags, "ExplicitLBAlgorithm="+alg.String())
 	}
 
-	if svc.Properties.Len() != 0 {
-		// Since the property is an "any", we'll just show the keys.
-		propKeys := make([]string, 0, svc.Properties.Len())
-		for k := range svc.Properties.All() {
-			propKeys = append(propKeys, k)
-		}
-		flags = append(flags, "Properties="+strings.Join(propKeys, ", "))
+	if svc.ForwardingMode != SVCForwardingModeUndef {
+		flags = append(flags, "ForwardingMode="+string(svc.ForwardingMode))
 	}
 
 	if svc.TrafficDistribution != TrafficDistributionDefault {
 		flags = append(flags, "TrafficDistribution="+string(svc.TrafficDistribution))
+	}
+
+	if svc.LoadBalancerClass != nil {
+		flags = append(flags, "LoadBalancerClass="+*svc.LoadBalancerClass)
 	}
 
 	sort.Strings(flags)

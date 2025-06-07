@@ -65,10 +65,6 @@ func (n *NodeAddress) DeepEqual(other *NodeAddress) bool {
 		n.DeviceName == other.DeviceName
 }
 
-func (n *NodeAddress) IP() net.IP {
-	return n.Addr.AsSlice()
-}
-
 func (n *NodeAddress) String() string {
 	return fmt.Sprintf("%s (%s)", n.Addr, n.DeviceName)
 }
@@ -213,7 +209,7 @@ type nodeAddressControllerParams struct {
 	Log             *slog.Logger
 	Config          NodeAddressConfig
 	Lifecycle       cell.Lifecycle
-	Jobs            job.Registry
+	Jobs            job.Group
 	DB              *statedb.DB
 	Devices         statedb.Table[*Device]
 	NodeAddresses   statedb.RWTable[NodeAddress]
@@ -245,9 +241,6 @@ func newNodeAddressController(p nodeAddressControllerParams) (tbl statedb.Table[
 }
 
 func (n *nodeAddressController) register() {
-	g := n.Jobs.NewGroup(n.Health)
-	g.Add(job.OneShot("node-address-update", n.run))
-
 	n.Lifecycle.Append(
 		cell.Hook{
 			OnStart: func(ctx cell.HookContext) error {
@@ -272,11 +265,11 @@ func (n *nodeAddressController) register() {
 				}
 				txn.Commit()
 
-				// Start the job in the background to incremental refresh
+				// Start a job in the background to incremental refresh
 				// the node addresses.
-				return g.Start(ctx)
+				n.Jobs.Add(job.OneShot("node-address-update", n.run))
+				return nil
 			},
-			OnStop: g.Stop,
 		})
 
 }

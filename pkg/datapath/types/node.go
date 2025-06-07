@@ -11,6 +11,8 @@ import (
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/xdp"
+	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/maglev"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 )
 
@@ -62,9 +64,11 @@ type LocalNodeConfiguration struct {
 	// NativeRoutingCIDRIPv6 is the v4 CIDR in which pod IPs are routable.
 	NativeRoutingCIDRIPv6 *cidr.CIDR
 
-	// LoopbackIPv4 is the IPv4 loopback address.
+	// LoopbackIPv4 is the source address used for SNAT when a Pod talks to itself
+	// over a Service.
+	//
 	// Immutable at runtime.
-	LoopbackIPv4 net.IP
+	ServiceLoopbackIPv4 net.IP
 
 	// Devices is the native network devices selected for datapath use.
 	// Mutable at runtime.
@@ -180,6 +184,13 @@ type LocalNodeConfiguration struct {
 	// XDPConfig holds configuration options to determine how the node should
 	// handle XDP programs.
 	XDPConfig xdp.Config
+
+	// LBConfig holds the configuration options for load-balancing
+	LBConfig loadbalancer.Config
+
+	// Maglev configuration provides the maglev table sizes and seeds for
+	// the BPF programs.
+	MaglevConfig maglev.Config
 }
 
 func (cfg *LocalNodeConfiguration) DeviceNames() []string {

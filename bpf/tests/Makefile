@@ -7,19 +7,15 @@ MAKEFLAGS += -r
 
 CLANG ?= clang
 
-FLAGS := -I$(ROOT_DIR)/bpf -I$(ROOT_DIR)/bpf/include -O2 -g
+FLAGS := -I$(ROOT_DIR)/bpf -I$(ROOT_DIR)/bpf/include -g
 
-CLANG_FLAGS := ${FLAGS} --target=bpf -std=gnu99 -nostdinc
-# eBPF verifier enforces unaligned access checks where necessary, so don't
-# let clang complain too early.
-CLANG_FLAGS += -Wall -Wextra -Werror -Wshadow
-CLANG_FLAGS += -Wno-address-of-packed-member
-CLANG_FLAGS += -Wno-unknown-warning-option
-CLANG_FLAGS += -Wno-gnu-variable-sized-type-not-at-end
-CLANG_FLAGS += -Wimplicit-int-conversion -Wenum-conversion
-CLANG_FLAGS += -Wimplicit-fallthrough
+# Base CFLAGS (CLANG_FLAGS) are read from pkg/datapath/loader/compile.go
+# to keep them synced with the loader
+CLANG_FLAGS := $(FLAGS) $(shell $(GO) run $(ROOT_DIR)/pkg/datapath/loader/tools/clang_cflags.go)
+
 # Create dependency files for each .o file.
 CLANG_FLAGS += -MD
+
 # Mimics the mcpu values set by cilium-agent. See GetBPFCPU().
 ifneq ($(KERNEL),54)
 CLANG_FLAGS += -mcpu=v3
@@ -53,7 +49,7 @@ clean:
 	rm -f $(wildcard *.i)
 	rm -f $(wildcard *.d)
 
-BPF_TEST_FLAGS:=
+BPF_TEST_FLAGS:= $(GO_TEST_FLAGS)
 ifneq ($(shell id -u), 0)
 		BPF_TEST_FLAGS += -exec "sudo -E"
 endif
@@ -83,6 +79,9 @@ ifdef BPF_TEST_FILE
 endif
 
 run: $(TEST_OBJECTS)
-	$(QUIET)$(GO) test ./bpftest -bpf-test-path $(ROOT_DIR)/bpf/tests $(BPF_TEST_FLAGS)
+	$(QUIET)$(GO) test ./bpftest \
+		-bpf-test-path $(ROOT_DIR)/bpf/tests \
+		$(BPF_TEST_FLAGS) \
+	| $(GOTEST_FORMATTER)
 
 -include $(TEST_OBJECTS:.o=.d)

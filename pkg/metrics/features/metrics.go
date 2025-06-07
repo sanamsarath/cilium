@@ -12,6 +12,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	"github.com/cilium/cilium/pkg/defaults"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/metrics/metric"
 	"github.com/cilium/cilium/pkg/option"
@@ -94,6 +95,7 @@ const (
 	networkChainingModeCalico      = "calico"
 	networkChainingModeFlannel     = "flannel"
 	networkChainingModeGenericVeth = "generic-veth"
+	networkChainingModePortmap     = "portmap"
 
 	networkIPv4      = "ipv4-only"
 	networkIPv6      = "ipv6-only"
@@ -145,6 +147,7 @@ var (
 		networkChainingModeCalico,
 		networkChainingModeFlannel,
 		networkChainingModeGenericVeth,
+		networkChainingModePortmap,
 	}
 
 	defaultIPAddressFamilies = []string{
@@ -177,14 +180,14 @@ var (
 	}
 
 	defaultNodePortModes = []string{
-		option.NodePortModeSNAT,
-		option.NodePortModeDSR,
-		option.NodePortModeHybrid,
+		loadbalancer.LBModeSNAT,
+		loadbalancer.LBModeDSR,
+		loadbalancer.LBModeHybrid,
 	}
 
 	defaultNodePortModeAlgorithms = []string{
-		option.NodePortAlgMaglev,
-		option.NodePortAlgRandom,
+		loadbalancer.LBAlgorithmMaglev,
+		loadbalancer.LBAlgorithmRandom,
 	}
 
 	defaultNodePortModeAccelerations = []string{
@@ -940,10 +943,10 @@ func NewMetrics(withDefaults bool) Metrics {
 }
 
 type featureMetrics interface {
-	update(params enabledFeatures, config *option.DaemonConfig)
+	update(params enabledFeatures, config *option.DaemonConfig, lbConfig loadbalancer.Config)
 }
 
-func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig) {
+func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig, lbConfig loadbalancer.Config) {
 	networkMode := networkModeDirectRouting
 	if config.TunnelingEnabled() {
 		switch params.TunnelProtocol() {
@@ -1021,7 +1024,7 @@ func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig) {
 		m.ACLBKubeProxyReplacementEnabled.Add(1)
 	}
 
-	m.ACLBNodePortConfig.WithLabelValues(config.NodePortMode, config.NodePortAlg, config.NodePortAcceleration).Add(1)
+	m.ACLBNodePortConfig.WithLabelValues(lbConfig.LBMode, lbConfig.LBAlgorithm, config.NodePortAcceleration).Add(1)
 
 	if config.EnableBGPControlPlane {
 		m.ACLBBGPEnabled.Add(1)

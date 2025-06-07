@@ -48,6 +48,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/maglev"
+	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	nodemanager "github.com/cilium/cilium/pkg/node/manager"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
@@ -95,6 +96,7 @@ func TestScript(t *testing.T) {
 			cni.Cell,
 			ipset.Cell,
 			dial.ServiceResolverCell,
+			metrics.Cell,
 
 			cell.Config(cmtypes.DefaultClusterInfo),
 			cell.Invoke(cmtypes.ClusterInfo.InitClusterIDMax, cmtypes.ClusterInfo.Validate),
@@ -109,8 +111,6 @@ func TestScript(t *testing.T) {
 						EnableIPv4:           true,
 						EnableIPv6:           true,
 						EnableNodePort:       true,
-						SockRevNatEntries:    1000,
-						LBMapEntries:         1000,
 						KubeProxyReplacement: option.KubeProxyReplacementTrue,
 					}
 				},

@@ -191,6 +191,7 @@ func newCmdConnectivityTest(hooks api.Hooks) *cobra.Command {
 	cmd.Flags().StringVar(&params.TestConnDisruptImage, "test-conn-disrupt-image", defaults.ConnectivityCheckImagesTest["ConnectivityTestConnDisruptImage"], "Image path to use for connection disruption tests")
 	cmd.Flags().StringVar(&params.FRRImage, "frr-image", defaults.ConnectivityCheckImagesTest["ConnectivityTestFRRImage"], "Image path to use for FRR")
 	cmd.Flags().StringVar(&params.SocatImage, "socat-image", defaults.ConnectivityCheckImagesTest["ConnectivityTestSocatImage"], "Image path to use for multicast tests")
+	cmd.Flags().StringVar(&params.EchoImage, "echo-image", defaults.ConnectivityCheckOptionalImagesTest["ConnectivityTestEchoImage"], "Image path to use for echo server")
 
 	cmd.Flags().UintVar(&params.Retry, "retry", defaults.ConnectRetry, "Number of retries on connection failure to external targets")
 	cmd.Flags().DurationVar(&params.RetryDelay, "retry-delay", defaults.ConnectRetryDelay, "Delay between retries for external targets")
@@ -287,6 +288,7 @@ func newCmdConnectivityPerf(hooks api.Hooks) *cobra.Command {
 	cmd.Flags().BoolVar(&params.PerfParameters.SameNode, "same-node", true, "Run tests in which the client and the server are hosted on the same node")
 	cmd.Flags().BoolVar(&params.PerfParameters.OtherNode, "other-node", true, "Run tests in which the client and the server are hosted on difference nodes")
 	cmd.Flags().BoolVar(&params.PerfParameters.NetQos, "net-qos", false, "Test pod network Quality of Service")
+	cmd.Flags().BoolVar(&params.PerfParameters.Bandwidth, "bandwidth", false, "Test pod network bandwidth manage")
 
 	cmd.Flags().BoolVar(&params.PerfParameters.KernelProfiles, "unsafe-capture-kernel-profiles", false,
 		"Capture kernel profiles during test execution. Warning: run on disposable nodes only, as it installs additional software and modifies their configuration")

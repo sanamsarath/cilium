@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -42,9 +44,13 @@ type kprConfig struct {
 	tunnelProtocol tunnel.EncapProtocol
 	nodePortMode   string
 	dispatchMode   string
+
+	lbConfig loadbalancer.Config
 }
 
 func (cfg *kprConfig) set() {
+	cfg.lbConfig = loadbalancer.DefaultConfig
+
 	option.Config.KubeProxyReplacement = cfg.kubeProxyReplacement
 	option.Config.EnableSocketLB = cfg.enableSocketLB
 	option.Config.EnableNodePort = cfg.enableNodePort
@@ -58,11 +64,12 @@ func (cfg *kprConfig) set() {
 	option.Config.EnableIPv4Masquerade = cfg.enableIPv4Masquerade
 	option.Config.EnableSocketLBTracing = true
 	option.Config.RoutingMode = cfg.routingMode
-	option.Config.LoadBalancerDSRDispatch = cfg.dispatchMode
 
-	if cfg.nodePortMode == option.NodePortModeDSR || cfg.nodePortMode == option.NodePortModeHybrid {
-		option.Config.NodePortMode = cfg.nodePortMode
+	if cfg.nodePortMode == loadbalancer.LBModeDSR || cfg.nodePortMode == loadbalancer.LBModeHybrid {
+		cfg.lbConfig.LBMode = cfg.nodePortMode
 	}
+
+	cfg.lbConfig.DSRDispatch = cfg.dispatchMode
 }
 
 func errorMatch(err error, regex string) assert.Comparison {
@@ -79,9 +86,11 @@ func errorMatch(err error, regex string) assert.Comparison {
 	}
 }
 
-func (cfg *kprConfig) verify(t *testing.T, tc tunnel.Config) {
-	err := initKubeProxyReplacementOptions(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"), tc)
+func (cfg *kprConfig) verify(t *testing.T, lbConfig loadbalancer.Config, tc tunnel.Config) {
+	logger := hivetest.Logger(t)
+	err := initKubeProxyReplacementOptions(logger, sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"), tc, lbConfig)
 	if err != nil || cfg.expectedErrorRegex != "" {
+		t.Logf("err=%s, expected=%s, cfg=%+v", err, cfg.expectedErrorRegex, cfg)
 		require.Condition(t, errorMatch(err, cfg.expectedErrorRegex))
 		if strings.Contains(cfg.expectedErrorRegex, "Invalid") {
 			return
@@ -107,8 +116,9 @@ func setupKPRSuite(tb testing.TB) *KPRSuite {
 	mockCmd := &cobra.Command{}
 	h := hive.New(Agent)
 	h.RegisterFlags(mockCmd.Flags())
-	InitGlobalFlags(mockCmd, h.Viper())
-	option.Config.Populate(h.Viper())
+	logger := hivetest.Logger(tb)
+	InitGlobalFlags(logger, mockCmd, h.Viper())
+	option.Config.Populate(logger, h.Viper())
 	option.Config.DryMode = true
 
 	return s
@@ -261,8 +271,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.VXLAN
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchOption
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchOption
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
@@ -283,8 +293,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeNative
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
@@ -303,8 +313,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
@@ -323,8 +333,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.VXLAN
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
@@ -345,8 +355,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeNative
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeHybrid
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
@@ -365,8 +375,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeHybrid
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
@@ -385,8 +395,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.VXLAN
-				cfg.nodePortMode = option.NodePortModeHybrid
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
@@ -408,7 +418,7 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 		cfg := def
 		testCase.mod(&cfg)
 		cfg.set()
-		testCase.out.verify(t, tunnel.NewTestConfig(cfg.tunnelProtocol))
+		testCase.out.verify(t, cfg.lbConfig, tunnel.NewTestConfig(cfg.tunnelProtocol))
 		def.set()
 	}
 }

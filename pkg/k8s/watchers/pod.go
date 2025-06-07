@@ -15,14 +15,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/statedb"
-	"go4.org/netipx"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -34,7 +30,6 @@ import (
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
-	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
@@ -52,14 +47,14 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/loadbalancer/legacy/redirectpolicy"
+	"github.com/cilium/cilium/pkg/loadbalancer/legacy/service"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/redirectpolicy"
-	"github.com/cilium/cilium/pkg/service"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
@@ -90,6 +85,7 @@ type k8sPodWatcherParams struct {
 	NodeAddrs         statedb.Table[datapathTables.NodeAddress]
 	LRPManager        *redirectpolicy.Manager
 	CGroupManager     cgroup.CGroupManager
+	LBConfig          loadbalancer.Config
 }
 
 func newK8sPodWatcher(params k8sPodWatcherParams) *K8sPodWatcher {
@@ -109,6 +105,7 @@ func newK8sPodWatcher(params k8sPodWatcherParams) *K8sPodWatcher {
 		db:                    params.DB,
 		pods:                  params.Pods,
 		nodeAddrs:             params.NodeAddrs,
+		lbConfig:              params.LBConfig,
 
 		controllersStarted: make(chan struct{}),
 	}
@@ -137,6 +134,7 @@ type K8sPodWatcher struct {
 	db                    *statedb.DB
 	pods                  statedb.Table[agentK8s.LocalPod]
 	nodeAddrs             statedb.Table[datapathTables.NodeAddress]
+	lbConfig              loadbalancer.Config
 
 	// controllersStarted is a channel that is closed when all watchers that do not depend on
 	// local node configuration have been started
@@ -541,19 +539,6 @@ func (k *K8sPodWatcher) deleteK8sPodV1(pod *slim_corev1.Pod) error {
 	return err
 }
 
-var (
-	_netnsCookieSupported     bool
-	_netnsCookieSupportedOnce sync.Once
-)
-
-func netnsCookieSupported(logger *slog.Logger) bool {
-	_netnsCookieSupportedOnce.Do(func() {
-		_netnsCookieSupported = probes.HaveProgramHelper(logger, ebpf.CGroupSock, asm.FnGetNetnsCookie) == nil &&
-			probes.HaveProgramHelper(logger, ebpf.CGroupSockAddr, asm.FnGetNetnsCookie) == nil
-	})
-	return _netnsCookieSupported
-}
-
 func (k *K8sPodWatcher) genServiceMappings(pod *slim_corev1.Pod, podIPs []string, logger *slog.Logger) []loadbalancer.LegacySVC {
 	var (
 		svcs       []loadbalancer.LegacySVC
@@ -567,19 +552,11 @@ func (k *K8sPodWatcher) genServiceMappings(pod *slim_corev1.Pod, podIPs []string
 				continue
 			}
 
-			if int(p.HostPort) >= option.Config.NodePortMin &&
-				int(p.HostPort) <= option.Config.NodePortMax {
+			if uint16(p.HostPort) >= k.lbConfig.NodePortMin &&
+				uint16(p.HostPort) <= k.lbConfig.NodePortMax {
 				logger.Warn(
 					fmt.Sprintf("The requested hostPort %d is colliding with the configured NodePort range [%d, %d]. Ignoring.",
-						p.HostPort, option.Config.NodePortMin, option.Config.NodePortMax))
-				continue
-			}
-
-			feIP := net.ParseIP(p.HostIP)
-			if feIP != nil && feIP.IsLoopback() && !netnsCookieSupported(logger) {
-				logger.Warn(
-					fmt.Sprintf("The requested loopback address for hostIP (%s) is not supported for kernels which don't provide netns cookies. Ignoring.",
-						feIP))
+						p.HostPort, k.lbConfig.NodePortMin, k.lbConfig.NodePortMax))
 				continue
 			}
 
@@ -615,19 +592,20 @@ func (k *K8sPodWatcher) genServiceMappings(pod *slim_corev1.Pod, podIPs []string
 			// on this address but not via other addresses. When it's not set,
 			// then expose via all local addresses. Same when the user provides
 			// an unspecified address (0.0.0.0 / [::]).
-			if feIP != nil && !feIP.IsUnspecified() {
+			feIP, _ := netip.ParseAddr(p.HostIP)
+			if feIP.IsValid() && !feIP.IsUnspecified() {
 				// Migrate the loopback address into a 0.0.0.0 / [::]
 				// surrogate, thus internal datapath handling can be
 				// streamlined. It's not exposed for traffic from outside.
 				if feIP.IsLoopback() {
-					if feIP.To4() != nil {
-						feIP = net.IPv4zero
+					if feIP.Is4() {
+						feIP = netip.IPv4Unspecified()
 					} else {
-						feIP = net.IPv6zero
+						feIP = netip.IPv6Unspecified()
 					}
 					loopbackHostport = true
 				}
-				nodeAddrAll = []netip.Addr{netipx.MustFromStdIP(feIP)}
+				nodeAddrAll = []netip.Addr{feIP}
 			} else {
 				iter := k.nodeAddrs.List(k.db.ReadTxn(), datapathTables.NodeAddressNodePortIndex.Query(true))
 				for addr := range iter {
@@ -861,7 +839,7 @@ func (k *K8sPodWatcher) updatePodHostData(oldPod, newPod *slim_corev1.Pod, oldPo
 		return fmt.Errorf("no/invalid HostIP: %s", newPod.Status.HostIP)
 	}
 
-	hostKey := node.GetEndpointEncryptKeyIndex()
+	hostKey := node.GetEndpointEncryptKeyIndex(k.logger)
 
 	k8sMeta := &ipcache.K8sMetadata{
 		Namespace: newPod.Namespace,

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
-
 #include <bpf/ctx/skb.h>
+#include "common.h"
 #include "pktgen.h"
 
 /* Enable code paths under test */
@@ -11,8 +10,6 @@
 #define ENABLE_NODEPORT
 #define SERVICE_NO_BACKEND_RESPONSE
 #define ENABLE_MASQUERADE_IPV6		1
-
-#define DISABLE_LOOPBACK_LB
 
 #define CLIENT_IP		v6_pod_one
 #define CLIENT_PORT		__bpf_htons(111)

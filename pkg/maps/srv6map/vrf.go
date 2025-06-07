@@ -5,12 +5,14 @@ package srv6map
 
 import (
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strconv"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/hive/cell"
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/config/defines"
@@ -150,7 +152,7 @@ func newVRFMaps(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*VRFMap4
 		&VRFKey4{},
 		&VRFValue{},
 		maxVRFEntries,
-		bpf.BPF_F_NO_PREALLOC,
+		unix.BPF_F_NO_PREALLOC,
 	)
 
 	m6 := bpf.NewMap(
@@ -159,7 +161,7 @@ func newVRFMaps(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*VRFMap4
 		&VRFKey6{},
 		&VRFValue{},
 		maxVRFEntries,
-		bpf.BPF_F_NO_PREALLOC,
+		unix.BPF_F_NO_PREALLOC,
 	)
 
 	lc.Append(cell.Hook{
@@ -189,13 +191,13 @@ func newVRFMaps(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*VRFMap4
 }
 
 // OpenVRFMaps opens the SRv6 VRF maps on bpffs
-func OpenVRFMaps() (*VRFMap4, *VRFMap6, error) {
-	m4, err := bpf.OpenMap(bpf.MapPath(vrfMapName4), &VRFKey4{}, &VRFValue{})
+func OpenVRFMaps(logger *slog.Logger) (*VRFMap4, *VRFMap6, error) {
+	m4, err := bpf.OpenMap(bpf.MapPath(logger, vrfMapName4), &VRFKey4{}, &VRFValue{})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	m6, err := bpf.OpenMap(bpf.MapPath(vrfMapName6), &VRFKey6{}, &VRFValue{})
+	m6, err := bpf.OpenMap(bpf.MapPath(logger, vrfMapName6), &VRFKey6{}, &VRFValue{})
 	if err != nil {
 		return nil, nil, err
 	}

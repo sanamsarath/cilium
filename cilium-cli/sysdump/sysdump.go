@@ -37,7 +37,6 @@ import (
 	"github.com/cilium/cilium/cilium-cli/k8s"
 	"github.com/cilium/cilium/cilium-cli/utils/features"
 	ciliumdef "github.com/cilium/cilium/pkg/defaults"
-	"github.com/cilium/cilium/pkg/versioncheck"
 )
 
 const sysdumpLogFile = "cilium-sysdump.log"
@@ -828,20 +827,6 @@ func (c *Collector) Run() error {
 			},
 		},
 		{
-			Description: "Collecting Cilium LoadBalancer IP Pools",
-			Quick:       true,
-			Task: func(ctx context.Context) error {
-				v, err := c.Client.ListCiliumLoadBalancerIPPools(ctx, metav1.ListOptions{})
-				if err != nil {
-					return fmt.Errorf("failed to collect Cilium LoadBalancer IP Pools: %w", err)
-				}
-				if err := c.WriteYAML(ciliumLoadBalancerIPPoolsFileName, v); err != nil {
-					return fmt.Errorf("failed to collect Cilium LoadBalancer IP Pools: %w", err)
-				}
-				return nil
-			},
-		},
-		{
 			Description: "Collecting Cilium Pod IP Pools",
 			Quick:       true,
 			Task: func(ctx context.Context) error {
@@ -1451,6 +1436,7 @@ func (c *Collector) Run() error {
 			},
 		},
 	}
+	ciliumTasks = append(ciliumTasks, collectCiliumV2OrV2Alpha1Resource(c, "ciliumloadbalancerippools", "Cilium LoadBalancer IP Pools"))
 
 	if c.Options.HubbleFlowsCount > 0 {
 		ciliumTasks = append(ciliumTasks, Task{
@@ -2399,14 +2385,7 @@ func (c *Collector) submitCiliumBugtoolTasks(pods []*corev1.Pod) error {
 			}()
 
 			// Default flags for cilium-bugtool
-			bugtoolFlags := []string{"--archiveType=gz"}
-			ciliumVersion, err := c.Client.GetCiliumVersion(ctx, p)
-			if err == nil {
-				// This flag is not available in older versions
-				if versioncheck.MustCompile(">=1.13.0")(*ciliumVersion) {
-					bugtoolFlags = append(bugtoolFlags, "--exclude-object-files")
-				}
-			}
+			bugtoolFlags := []string{"--archiveType=gz", "--exclude-object-files"}
 			// Additional flags
 			bugtoolFlags = append(bugtoolFlags, c.Options.CiliumBugtoolFlags...)
 

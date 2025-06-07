@@ -185,6 +185,11 @@ Users (Alphabetically)
       D: Cognite is an industrial DataOps provider and uses Cilium as the CNI plugin
       Q: @Robert Collins
 
+    * N: Confluent
+      D: Confluent is a data streaming platform to stream, connect, process, and govern data in real-time.
+      U: Networking, NetworkPolicy
+      L: https://www.confluent.io
+
     * N: CONNY
       D: CONNY is legaltech platform to improve access to justice for individuals
       U: Networking, NetworkPolicy, Services
@@ -592,6 +597,12 @@ Users (Alphabetically)
     * N: Overstock Inc.
       D: Overstock is using Cilium as the main CNI plugin on bare-metal clusters (self hosted k8s).
       U: Networking, network policy, hubble, observability
+
+    * N: OVHcloud
+      D: OVHcloud is using Cilium as the default CNI on their Managed Kubernetes Service (MKS) clusters offering with Premium plan.
+      U: CNI, network policies, visibility
+      L: https://www.ovhcloud.com/
+      Q: @scraly
 
     * N: Palantir Technologies Inc.
       D: Palantir is using Cilium as their main CNI plugin in all major cloud providers [AWS/Azure/GCP] (self hosted k8s).

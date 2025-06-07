@@ -106,9 +106,6 @@ func maybeUnloadObsoleteXDPPrograms(logger *slog.Logger, xdpDevs []string, xdpMo
 func xdpCompileArgs(extraCArgs []string) ([]string, error) {
 	args := []string{}
 	copy(args, extraCArgs)
-	if option.Config.EnableNodePort {
-		args = append(args, "-DDISABLE_LOOPBACK_LB")
-	}
 
 	return args, nil
 }
@@ -146,7 +143,7 @@ func compileAndLoadXDPProg(ctx context.Context, logger *slog.Logger, lnc *datapa
 		return fmt.Errorf("retrieving device %s: %w", xdpDev, err)
 	}
 
-	spec, err := bpf.LoadCollectionSpec(objPath)
+	spec, err := bpf.LoadCollectionSpec(logger, objPath)
 	if err != nil {
 		return fmt.Errorf("loading eBPF ELF %s: %w", objPath, err)
 	}
@@ -156,7 +153,7 @@ func compileAndLoadXDPProg(ctx context.Context, logger *slog.Logger, lnc *datapa
 	cfg.DeviceMTU = uint16(iface.Attrs().MTU)
 
 	var obj xdpObjects
-	commit, err := bpf.LoadAndAssign(&obj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(logger, &obj, spec, &bpf.CollectionOptions{
 		Constants: cfg,
 		MapRenames: map[string]string{
 			"cilium_calls": fmt.Sprintf("cilium_calls_xdp_%d", iface.Attrs().Index),

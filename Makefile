@@ -36,7 +36,7 @@ SUBDIRS := $(filter-out $(foreach dir,$(SUBDIRS),$(dir)/%),$(SUBDIRS))
 # Because is treated as a Go package pattern, the special '...' sequence is supported,
 # meaning 'all subpackages of the given package'.
 TESTPKGS ?= ./...
-UNPARALLELTESTPKGS ?= ./pkg/datapath/linux/ipsec/...
+UNPARALLELTESTPKGS ?= ./pkg/datapath/linux/...
 
 GOTEST_BASE := -timeout 720s
 GOTEST_COVER_OPTS += -coverprofile=coverage.out
@@ -356,9 +356,6 @@ check-k8s-clusterrole: ## Ensures there is no diff between preflight's clusterro
 	./contrib/scripts/check-preflight-clusterrole.sh
 
 ##@ Development
-vps: ## List all the running vagrant VMs.
-	VBoxManage list runningvms
-
 reload: ## Reload cilium-agent and cilium-docker systemd service after installing built binaries.
 	sudo systemctl stop cilium cilium-docker
 	sudo $(MAKE) install
@@ -391,9 +388,10 @@ lint: golangci-lint
 
 lint-fix: golangci-lint-fix
 
-logging-subsys-field: ## Validate logrus subsystem field for logs in Go source code.
-	@$(ECHO_CHECK) contrib/scripts/check-logging-subsys-field.sh
-	$(QUIET) contrib/scripts/check-logging-subsys-field.sh
+check-permissions: ## Check if files are not executable expect for allowlisted files. \
+	# This can happen especially when someone is developing on a Windows machine
+	find ./ -executable -type f | grep -Ev "\.git|\.sh|\.py" > ./executables.txt
+	diff <(sort ./executables.txt) <(sort ./contrib/executable_list.txt)
 
 check-microk8s: ## Validate if microk8s is ready to install cilium.
 	@$(ECHO_CHECK) microk8s is ready...
@@ -412,7 +410,7 @@ microk8s: check-microk8s ## Build cilium-dev docker image and import to microk8s
 	@echo "  DEPLOY image to microk8s ($(LOCAL_OPERATOR_IMAGE))"
 	$(QUIET)./contrib/scripts/microk8s-import.sh $(LOCAL_OPERATOR_IMAGE)
 
-precheck: logging-subsys-field ## Peform build precheck for the source code.
+precheck: ## Peform build precheck for the source code.
 ifeq ($(SKIP_K8S_CODE_GEN_CHECK),"false")
 	@$(ECHO_CHECK) contrib/scripts/check-k8s-code-gen.sh
 	$(QUIET) contrib/scripts/check-k8s-code-gen.sh
@@ -511,7 +509,7 @@ help: ## Display help for the Makefile, from https://www.thapaliya.com/en/writin
 	$(call print_help_line,"docker-clustermesh-apiserver-image","Build docker image for Cilium clustermesh APIServer")
 	$(call print_help_line,"docker-operator-image","Build cilium-operator docker image")
 	$(call print_help_line,"docker-operator-*-image","Build platform specific cilium-operator images(alibabacloud, aws, azure, generic)")
-	$(call print_help_line,"docker-operator-*-image-debug","Build platform specific cilium-operator debug images(alibabacloud, aws, azure, generic)")
+	$(call print_help_line,"dev-docker-operator-*-image-debug","Build platform specific cilium-operator debug images(alibabacloud, aws, azure, generic)")
 	$(call print_help_line,"docker-*-image-unstripped","Build unstripped version of above docker images(cilium, hubble-relay, operator etc.)")
 
 .PHONY: help clean clean-container dev-doctor force generate-api generate-health-api generate-operator-api generate-kvstoremesh-api generate-hubble-api generate-sdp-api install licenses-all veryclean run_bpf_tests run-builder
@@ -523,16 +521,22 @@ BPF_TEST_VERBOSE ?= 0
 
 run_bpf_tests: ## Build and run the BPF unit tests using the cilium-builder container image.
 	DOCKER_ARGS=--privileged RUN_AS_ROOT=1 contrib/scripts/builder.sh \
-		"make" "-j$(shell nproc)" "-C" "bpf/tests/" "run" "BPF_TEST_FILE=$(BPF_TEST_FILE)" "BPF_TEST_DUMP_CTX=$(BPF_TEST_DUMP_CTX)" "V=$(BPF_TEST_VERBOSE)"
+		$(MAKE) $(SUBMAKEOPTS) -j$(shell nproc) -C bpf/tests/ run \
+			"BPF_TEST_FILE=$(BPF_TEST_FILE)" \
+			"BPF_TEST_DUMP_CTX=$(BPF_TEST_DUMP_CTX)" \
+			"LOG_CODEOWNERS=$(LOG_CODEOWNERS)" \
+			"JUNIT_PATH=$(JUNIT_PATH)" \
+			"V=$(BPF_TEST_VERBOSE)"
 
 run-builder: ## Drop into a shell inside a container running the cilium-builder image.
 	DOCKER_ARGS=-it contrib/scripts/builder.sh bash
 
 .PHONY: renovate-local
 renovate-local: ## Run a local linter for the renovate configuration
-	$(CONTAINER_ENGINE) run --rm -ti \
+	@echo "Running renovate --platform=local"
+	@$(CONTAINER_ENGINE) run --rm -ti \
 		-e LOG_LEVEL=debug \
-		-e GITHUB_COM_TOKEN="$(gh auth token)" \
+		-e GITHUB_COM_TOKEN="$(RENOVATE_GITHUB_COM_TOKEN)" \
 		-v /tmp:/tmp \
 		-v $(ROOT_DIR):/usr/src/app \
 		docker.io/renovate/renovate:slim \

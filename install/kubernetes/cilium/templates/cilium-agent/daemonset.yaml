@@ -267,7 +267,7 @@ spec:
           hostPort: {{ .Values.envoy.prometheus.port }}
           protocol: TCP
         {{- end }}
-        {{- if and .Values.envoy.debug.admin.port (not $envoyDS) }}
+        {{- if and .Values.envoy.debug.admin.enabled .Values.envoy.debug.admin.port (not $envoyDS) }}
         - name: envoy-admin
           containerPort: {{ .Values.envoy.debug.admin.port }}
           hostPort: {{ .Values.envoy.debug.admin.port }}
@@ -449,6 +449,10 @@ spec:
       - name: config
         image: {{ include "cilium.image" .Values.image | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.initResources }}
+        resources:
+          {{- toYaml . | trim | nindent 10 }}
+        {{- end }}
         command:
         - cilium-dbg
         - build-config
@@ -1034,7 +1038,7 @@ spec:
           defaultMode: 0400
           sources:
           - secret:
-              name: {{ .Values.hubble.tls.server.existingSecret | default "hubble-metrics-server-certs" }}
+              name: {{ .Values.hubble.metrics.tls.server.existingSecret | default "hubble-metrics-server-certs" }}
               optional: true
               items:
               - key: tls.crt
