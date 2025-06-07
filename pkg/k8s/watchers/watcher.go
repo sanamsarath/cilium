@@ -246,12 +246,12 @@ func GetGroupsForCiliumResources(logger *slog.Logger, cfg WatcherConfiguration, 
 			if r == synced.CRDResourceName(cilium_v2.CNPName) ||
 				r == synced.CRDResourceName(cilium_v2.CCNPName) ||
 				r == synced.CRDResourceName(cilium_v2.CIDName) {
-				logging.DefaultLogger.Infof("Skipping addition of %s, to Cilium resource init sync wait group, as centralized network policy is enabled", r)
+				logging.DefaultSlogLogger.Info(fmt.Sprintf("Skipping addition of %s, to Cilium resource init sync wait group, as centralized network policy is enabled", r))
 				continue
 			}
 		} else {
 			if r == synced.CRDResourceName(v2alpha1.CRPName) {
-				logging.DefaultLogger.Infof("Skipping addition of %s, to Cilium resource init sync wait group, as centralized network policy is not enabled", r)
+				logging.DefaultSlogLogger.Info(fmt.Sprintf("Skipping addition of %s, to Cilium resource init sync wait group, as centralized network policy is not enabled", r))
 				continue
 			}
 		}
