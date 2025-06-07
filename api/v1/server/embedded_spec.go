@@ -1650,88 +1650,6 @@ func init() {
             "description": "Service not found"
           }
         }
-      },
-      "put": {
-        "tags": [
-          "service"
-        ],
-        "summary": "Create or update service",
-        "parameters": [
-          {
-            "$ref": "#/parameters/service-id"
-          },
-          {
-            "$ref": "#/parameters/service-config"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Updated"
-          },
-          "201": {
-            "description": "Created"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "460": {
-            "description": "Invalid frontend in service configuration",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "InvalidFrontend"
-          },
-          "461": {
-            "description": "Invalid backend in service configuration",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "InvalidBackend"
-          },
-          "500": {
-            "description": "Error while creating service",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "Failure"
-          },
-          "501": {
-            "description": "Error while updating backend states",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "UpdateBackendFailure"
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "service"
-        ],
-        "summary": "Delete a service",
-        "parameters": [
-          {
-            "$ref": "#/parameters/service-id"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Service not found"
-          },
-          "500": {
-            "description": "Service deletion failed",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "Failure"
-          }
-        }
       }
     }
   },
@@ -3368,26 +3286,30 @@ func init() {
         }
       }
     },
+    "HubbleMetricsStatus": {
+      "description": "Status of the Hubble metrics server\n\n+k8s:deepcopy-gen=true",
+      "type": "object",
+      "properties": {
+        "msg": {
+          "description": "Human readable status/error/warning message",
+          "type": "string"
+        },
+        "state": {
+          "description": "State the component is in",
+          "type": "string",
+          "enum": [
+            "Ok",
+            "Warning",
+            "Failure",
+            "Disabled"
+          ]
+        }
+      }
+    },
     "HubbleStatus": {
       "description": "Status of the Hubble server\n\n+k8s:deepcopy-gen=true",
       "type": "object",
       "properties": {
-        "metrics": {
-          "description": "Status of the Hubble metrics server",
-          "type": "object",
-          "properties": {
-            "state": {
-              "description": "State of the Hubble metrics",
-              "type": "string",
-              "enum": [
-                "Ok",
-                "Warning",
-                "Failure",
-                "Disabled"
-              ]
-            }
-          }
-        },
         "msg": {
           "description": "Human readable status/error/warning message",
           "type": "string"
@@ -5104,6 +5026,10 @@ func init() {
         "hubble": {
           "description": "Status of Hubble server",
           "$ref": "#/definitions/HubbleStatus"
+        },
+        "hubble-metrics": {
+          "description": "Status of Hubble metrics server",
+          "$ref": "#/definitions/HubbleMetricsStatus"
         },
         "identity-range": {
           "description": "Status of identity range of the cluster",
@@ -7357,102 +7283,6 @@ func init() {
             "description": "Service not found"
           }
         }
-      },
-      "put": {
-        "tags": [
-          "service"
-        ],
-        "summary": "Create or update service",
-        "parameters": [
-          {
-            "type": "integer",
-            "description": "ID of service",
-            "name": "id",
-            "in": "path",
-            "required": true
-          },
-          {
-            "description": "Service configuration",
-            "name": "config",
-            "in": "body",
-            "required": true,
-            "schema": {
-              "$ref": "#/definitions/ServiceSpec"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Updated"
-          },
-          "201": {
-            "description": "Created"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "460": {
-            "description": "Invalid frontend in service configuration",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "InvalidFrontend"
-          },
-          "461": {
-            "description": "Invalid backend in service configuration",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "InvalidBackend"
-          },
-          "500": {
-            "description": "Error while creating service",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "Failure"
-          },
-          "501": {
-            "description": "Error while updating backend states",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "UpdateBackendFailure"
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "service"
-        ],
-        "summary": "Delete a service",
-        "parameters": [
-          {
-            "type": "integer",
-            "description": "ID of service",
-            "name": "id",
-            "in": "path",
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Service not found"
-          },
-          "500": {
-            "description": "Service deletion failed",
-            "schema": {
-              "$ref": "#/definitions/Error"
-            },
-            "x-go-name": "Failure"
-          }
-        }
       }
     }
   },
@@ -9164,26 +8994,30 @@ func init() {
         }
       }
     },
+    "HubbleMetricsStatus": {
+      "description": "Status of the Hubble metrics server\n\n+k8s:deepcopy-gen=true",
+      "type": "object",
+      "properties": {
+        "msg": {
+          "description": "Human readable status/error/warning message",
+          "type": "string"
+        },
+        "state": {
+          "description": "State the component is in",
+          "type": "string",
+          "enum": [
+            "Ok",
+            "Warning",
+            "Failure",
+            "Disabled"
+          ]
+        }
+      }
+    },
     "HubbleStatus": {
       "description": "Status of the Hubble server\n\n+k8s:deepcopy-gen=true",
       "type": "object",
       "properties": {
-        "metrics": {
-          "description": "Status of the Hubble metrics server",
-          "type": "object",
-          "properties": {
-            "state": {
-              "description": "State of the Hubble metrics",
-              "type": "string",
-              "enum": [
-                "Ok",
-                "Warning",
-                "Failure",
-                "Disabled"
-              ]
-            }
-          }
-        },
         "msg": {
           "description": "Human readable status/error/warning message",
           "type": "string"
@@ -9213,22 +9047,6 @@ func init() {
         },
         "state": {
           "description": "State the component is in",
-          "type": "string",
-          "enum": [
-            "Ok",
-            "Warning",
-            "Failure",
-            "Disabled"
-          ]
-        }
-      }
-    },
-    "HubbleStatusMetrics": {
-      "description": "Status of the Hubble metrics server",
-      "type": "object",
-      "properties": {
-        "state": {
-          "description": "State of the Hubble metrics",
           "type": "string",
           "enum": [
             "Ok",
@@ -11353,6 +11171,10 @@ func init() {
         "hubble": {
           "description": "Status of Hubble server",
           "$ref": "#/definitions/HubbleStatus"
+        },
+        "hubble-metrics": {
+          "description": "Status of Hubble metrics server",
+          "$ref": "#/definitions/HubbleMetricsStatus"
         },
         "identity-range": {
           "description": "Status of identity range of the cluster",

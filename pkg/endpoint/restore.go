@@ -30,6 +30,7 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
+	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/node"
@@ -419,6 +420,7 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 		DockerEndpointID:         e.dockerEndpointID,
 		IfName:                   e.ifName,
 		IfIndex:                  e.ifIndex,
+		ParentIfIndex:            e.parentIfIndex,
 		ContainerIfName:          e.containerIfName,
 		DisableLegacyIdentifiers: e.disableLegacyIdentifiers,
 		Labels:                   e.labels,
@@ -478,6 +480,11 @@ type serializableEndpoint struct {
 
 	// ifIndex is the interface index of the host face interface (veth pair)
 	IfIndex int
+
+	// parentIfIndex is the interface index of the interface with which the endpoint
+	// IP is associated. In some scenarios, the network will expect traffic with
+	// the endpoint IP to be sent via the parent interface.
+	ParentIfIndex int
 
 	// ContainerIfName is the name of the container facing interface (veth pair).
 	ContainerIfName string
@@ -568,7 +575,7 @@ func (ep *Endpoint) UnmarshalJSON(raw []byte) error {
 		Labels:     labels.NewOpLabels(),
 		Options:    option.NewIntOptions(&EndpointMutableOptionLibrary),
 		DNSHistory: fqdn.NewDNSCacheWithLimit(option.Config.ToFQDNsMinTTL, option.Config.ToFQDNsMaxIPsPerHost),
-		DNSZombies: fqdn.NewDNSZombieMappings(option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
+		DNSZombies: fqdn.NewDNSZombieMappings(logging.DefaultSlogLogger, option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
 	}
 	if err := json.Unmarshal(raw, restoredEp); err != nil {
 		return fmt.Errorf("error unmarshaling serializableEndpoint from base64 representation: %w", err)
@@ -593,6 +600,7 @@ func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.dockerEndpointID = r.DockerEndpointID
 	ep.ifName = r.IfName
 	ep.ifIndex = r.IfIndex
+	ep.parentIfIndex = r.ParentIfIndex
 	ep.containerIfName = r.ContainerIfName
 	ep.disableLegacyIdentifiers = r.DisableLegacyIdentifiers
 	ep.labels = r.Labels

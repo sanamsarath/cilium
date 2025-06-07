@@ -16,8 +16,10 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/pkg/option"
@@ -55,7 +57,7 @@ func (k *TestValue) NewSlice() any  { return &TestValues{} }
 func setup(tb testing.TB) *Map {
 	testutils.PrivilegedTest(tb)
 
-	CheckOrMountFS("")
+	CheckOrMountFS(hivetest.Logger(tb), "")
 
 	err := rlimit.RemoveMemlock()
 	require.NoError(tb, err)
@@ -65,7 +67,7 @@ func setup(tb testing.TB) *Map {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC,
+		unix.BPF_F_NO_PREALLOC,
 	).WithCache()
 
 	err = testMap.OpenOrCreate()
@@ -81,7 +83,7 @@ func setup(tb testing.TB) *Map {
 func setupPerCPU(tb testing.TB) *Map {
 	testutils.PrivilegedTest(tb)
 
-	CheckOrMountFS("")
+	CheckOrMountFS(hivetest.Logger(tb), "")
 
 	err := rlimit.RemoveMemlock()
 	require.NoError(tb, err)
@@ -128,7 +130,7 @@ func TestOpen(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	defer func() {
 		err = existingMap.Close()
 		require.NoError(t, err)
@@ -142,12 +144,13 @@ func TestOpen(t *testing.T) {
 
 func TestOpenMap(t *testing.T) {
 	testMap := setup(t)
+	logger := hivetest.Logger(t)
 
 	openedMap, err := OpenMap("cilium_test_no_exist", &TestKey{}, &TestValue{})
 	require.Error(t, err)
 	require.Nil(t, openedMap)
 
-	openedMap, err = OpenMap(MapPath("cilium_test"), &TestKey{}, &TestValue{})
+	openedMap, err = OpenMap(MapPath(logger, "cilium_test"), &TestKey{}, &TestValue{})
 	require.NoError(t, err)
 	require.True(t, mapsEqual(openedMap, testMap))
 }
@@ -161,11 +164,11 @@ func TestOpenOrCreate(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := existingMap.OpenOrCreate()
 	require.NoError(t, err)
 
-	// preallocMap unsets BPF_F_NO_PREALLOC. OpenOrCreate should recreate map.
+	// preallocMap unsets unix.BPF_F_NO_PREALLOC. OpenOrCreate should recreate map.
 	EnableMapPreAllocation() // prealloc on/off is controllable in HASH map case.
 	preallocMap := NewMap("cilium_test",
 		ebpf.Hash,
@@ -191,7 +194,7 @@ func TestRecreateMap(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := parallelMap.Recreate()
 	defer parallelMap.Close()
 	require.NoError(t, err)
@@ -235,7 +238,7 @@ func TestBasicManipulation(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).
+		unix.BPF_F_NO_PREALLOC).
 		WithCache().
 		WithEvents(option.BPFEventBufferConfig{Enabled: true, MaxSize: 10})
 
@@ -427,7 +430,7 @@ func TestSubscribe(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).
+		unix.BPF_F_NO_PREALLOC).
 		WithCache().
 		WithEvents(option.BPFEventBufferConfig{Enabled: true, MaxSize: 10})
 
@@ -601,7 +604,7 @@ func TestDumpReliablyWithCallbackOverlapping(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		int(maxEntries),
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := m.OpenOrCreate()
 	require.NoError(t, err)
 	defer func() {
@@ -689,7 +692,7 @@ func TestDumpReliablyWithCallback(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		int(maxEntries),
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := m.OpenOrCreate()
 	require.NoError(t, err)
 	defer func() {
@@ -820,7 +823,7 @@ func TestCheckAndUpgrade(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := upgradeMap.OpenOrCreate()
 	require.NoError(t, err)
 	defer func() {
@@ -832,7 +835,7 @@ func TestCheckAndUpgrade(t *testing.T) {
 	upgrade := upgradeMap.CheckAndUpgrade(upgradeMap)
 	require.False(t, upgrade)
 
-	// preallocMap unsets BPF_F_NO_PREALLOC so upgrade is needed.
+	// preallocMap unsets unix.BPF_F_NO_PREALLOC so upgrade is needed.
 	EnableMapPreAllocation()
 	preallocMap := NewMap("cilium_test_upgrade",
 		ebpf.Hash,
@@ -854,7 +857,7 @@ func TestUnpin(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := unpinMap.OpenOrCreate()
 	require.NoError(t, err)
 	exist, err = unpinMap.exist()
@@ -892,7 +895,7 @@ func TestCreateUnpinned(t *testing.T) {
 		&TestKey{},
 		&TestValue{},
 		maxEntries,
-		BPF_F_NO_PREALLOC).WithCache()
+		unix.BPF_F_NO_PREALLOC).WithCache()
 	err := m.CreateUnpinned()
 	require.NoError(t, err)
 	exist, err := m.exist()
@@ -917,7 +920,7 @@ func BenchmarkMapLookup(b *testing.B) {
 		&TestKey{},
 		&TestValue{},
 		1,
-		BPF_F_NO_PREALLOC)
+		unix.BPF_F_NO_PREALLOC)
 
 	if err := m.CreateUnpinned(); err != nil {
 		b.Fatal(err)
@@ -937,7 +940,8 @@ func BenchmarkMapLookup(b *testing.B) {
 
 func TestErrorResolver(t *testing.T) {
 	testutils.PrivilegedTest(t)
-	CheckOrMountFS("")
+	logger := hivetest.Logger(t)
+	CheckOrMountFS(logger, "")
 	require.NoError(t, rlimit.RemoveMemlock())
 
 	var (
@@ -972,7 +976,7 @@ func TestErrorResolver(t *testing.T) {
 				&TestKey{},
 				&TestValue{},
 				1, // Only one entry, so that the second insertion will fail
-				BPF_F_NO_PREALLOC,
+				unix.BPF_F_NO_PREALLOC,
 			).WithCache()
 
 			t.Cleanup(func() {
@@ -1072,6 +1076,10 @@ func TestBatchIterator(t *testing.T) {
 		}
 		assert.Len(t, ks, int(size))
 		assert.Len(t, vs, int(size))
+		assert.Equal(t, size, count)
+
+		count, err := m.BatchCount()
+		require.NoError(t, err, "BatchCount")
 		assert.Equal(t, size, count)
 	}
 

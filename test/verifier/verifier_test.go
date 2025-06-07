@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
@@ -21,7 +22,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/hive/hivetest"
 	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/bpf"
@@ -104,7 +105,8 @@ func readDatapathConfig(t *testing.T, r io.Reader) string {
 func TestVerifier(t *testing.T) {
 	flag.Parse()
 
-	logging.DefaultLogger.SetLevel(logrus.DebugLevel)
+	logger := hivetest.Logger(t)
+	logging.SetLogLevel(slog.LevelDebug)
 
 	if ciliumBasePath == nil || *ciliumBasePath == "" {
 		t.Skip("Please set -cilium-base-path to run verifier tests")
@@ -188,7 +190,7 @@ func TestVerifier(t *testing.T) {
 					}
 
 					// Parse the compiled object into a CollectionSpec.
-					spec, err := bpf.LoadCollectionSpec(objFile)
+					spec, err := bpf.LoadCollectionSpec(logger, objFile)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -212,7 +214,7 @@ func TestVerifier(t *testing.T) {
 						m.Pinning = ebpf.PinNone
 					}
 
-					coll, _, err := bpf.LoadCollection(spec, &bpf.CollectionOptions{
+					coll, _, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
 						CollectionOptions: ebpf.CollectionOptions{
 							// Enable verifier logs for successful loads.
 							// Use log level 1 since it's known by all target kernels.

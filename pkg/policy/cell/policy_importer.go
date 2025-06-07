@@ -197,6 +197,7 @@ func (i *policyImporter) updatePrefixes(ctx context.Context, updates []*policyty
 					Source:   prefixSource[resource],
 					Resource: resource,
 					Metadata: []ipcache.IPMetadata{labels.GetCIDRLabels(prefix)},
+					IsCIDR:   true,
 				})
 			}
 			continue
@@ -229,6 +230,7 @@ func (i *policyImporter) updatePrefixes(ctx context.Context, updates []*policyty
 				Source:   prefixSource[resource],
 				Resource: resource,
 				Metadata: []ipcache.IPMetadata{labels.GetCIDRLabels(prefix)},
+				IsCIDR:   true,
 			})
 		}
 		if oldSet.Len() > 0 {
@@ -272,6 +274,7 @@ func (i *policyImporter) prunePrefixes(prunePrefixes map[ipcachetypes.ResourceID
 				Prefix:   cmtypes.NewLocalPrefixCluster(oldPrefix),
 				Resource: resource,
 				Metadata: []ipcache.IPMetadata{labels.Labels{}},
+				IsCIDR:   true,
 			})
 		}
 	}

@@ -13,6 +13,7 @@
 #if defined(ENABLE_HOST_FIREWALL)
 
 #include "auth.h"
+#include "eps.h"
 #include "policy.h"
 #include "proxy.h"
 #include "trace.h"
@@ -105,7 +106,7 @@ __ipv6_host_policy_egress(struct __ctx_buff *ctx, bool is_host_id __maybe_unused
 
 	/* Retrieve destination identity. */
 	info = lookup_ip6_remote_endpoint((union v6addr *)&ip6->daddr, 0);
-	if (info && info->sec_identity) {
+	if (info) {
 		dst_sec_identity = info->sec_identity;
 		tunnel_endpoint = info->tunnel_endpoint.ip4;
 	}
@@ -155,7 +156,7 @@ __ipv6_host_policy_egress(struct __ctx_buff *ctx, bool is_host_id __maybe_unused
 		/* Trace the packet before it is forwarded to proxy */
 		send_trace_notify(ctx, TRACE_TO_PROXY, SECLABEL_IPV6, UNKNOWN_ID,
 				  bpf_ntohs(proxy_port), TRACE_IFINDEX_UNKNOWN,
-				  trace->reason, trace->monitor);
+				  trace->reason, trace->monitor, bpf_htons(ETH_P_IPV6));
 		return ctx_redirect_to_proxy_host_egress(ctx, proxy_port);
 	}
 
@@ -190,7 +191,7 @@ ipv6_host_policy_ingress_lookup(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 	/* Retrieve destination identity. */
 	ipv6_addr_copy(&tuple->daddr, (union v6addr *)&ip6->daddr);
 	info = lookup_ip6_remote_endpoint(&tuple->daddr, 0);
-	if (info && info->sec_identity)
+	if (info)
 		dst_sec_identity = info->sec_identity;
 	cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED6 : DBG_IP_ID_MAP_FAILED6,
 		   tuple->daddr.p4, dst_sec_identity);
@@ -236,7 +237,7 @@ __ipv6_host_policy_ingress(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 
 	/* Retrieve source identity. */
 	info = lookup_ip6_remote_endpoint((union v6addr *)&ip6->saddr, 0);
-	if (info && info->sec_identity) {
+	if (info) {
 		*src_sec_identity = info->sec_identity;
 		tunnel_endpoint = info->tunnel_endpoint.ip4;
 	}
@@ -402,7 +403,7 @@ __ipv4_host_policy_egress(struct __ctx_buff *ctx, bool is_host_id __maybe_unused
 
 	/* Retrieve destination identity. */
 	info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
-	if (info && info->sec_identity) {
+	if (info) {
 		dst_sec_identity = info->sec_identity;
 		tunnel_endpoint = info->tunnel_endpoint.ip4;
 	}
@@ -452,7 +453,7 @@ __ipv4_host_policy_egress(struct __ctx_buff *ctx, bool is_host_id __maybe_unused
 		/* Trace the packet before it is forwarded to proxy */
 		send_trace_notify(ctx, TRACE_TO_PROXY, SECLABEL_IPV4, UNKNOWN_ID,
 				  bpf_ntohs(proxy_port), TRACE_IFINDEX_UNKNOWN,
-				  trace->reason, trace->monitor);
+				  trace->reason, trace->monitor, bpf_htons(ETH_P_IP));
 		return ctx_redirect_to_proxy_host_egress(ctx, proxy_port);
 	}
 
@@ -485,7 +486,7 @@ ipv4_host_policy_ingress_lookup(struct __ctx_buff *ctx, struct iphdr *ip4,
 
 	/* Retrieve destination identity. */
 	info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
-	if (info && info->sec_identity)
+	if (info)
 		dst_sec_identity = info->sec_identity;
 	cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED4 : DBG_IP_ID_MAP_FAILED4,
 		   ip4->daddr, dst_sec_identity);
@@ -527,7 +528,7 @@ __ipv4_host_policy_ingress(struct __ctx_buff *ctx, struct iphdr *ip4,
 
 	/* Retrieve source identity. */
 	info = lookup_ip4_remote_endpoint(ip4->saddr, 0);
-	if (info && info->sec_identity) {
+	if (info) {
 		*src_sec_identity = info->sec_identity;
 		tunnel_endpoint = info->tunnel_endpoint.ip4;
 	}

@@ -5,12 +5,14 @@ package srv6map
 
 import (
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strconv"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/hive/cell"
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/config/defines"
@@ -146,7 +148,7 @@ func newPolicyMaps(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*Poli
 		&PolicyKey4{},
 		&PolicyValue{},
 		maxPolicyEntries,
-		bpf.BPF_F_NO_PREALLOC,
+		unix.BPF_F_NO_PREALLOC,
 	)
 
 	m6 := bpf.NewMap(
@@ -155,7 +157,7 @@ func newPolicyMaps(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*Poli
 		&PolicyKey6{},
 		&PolicyValue{},
 		maxPolicyEntries,
-		bpf.BPF_F_NO_PREALLOC,
+		unix.BPF_F_NO_PREALLOC,
 	)
 
 	lc.Append(cell.Hook{
@@ -185,12 +187,12 @@ func newPolicyMaps(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*Poli
 }
 
 // OpenPolicyMaps opens the SRv6 policy maps on bpffs
-func OpenPolicyMaps() (*PolicyMap4, *PolicyMap6, error) {
-	m4, err := bpf.OpenMap(bpf.MapPath(policyMapName4), &PolicyKey4{}, &PolicyValue{})
+func OpenPolicyMaps(logger *slog.Logger) (*PolicyMap4, *PolicyMap6, error) {
+	m4, err := bpf.OpenMap(bpf.MapPath(logger, policyMapName4), &PolicyKey4{}, &PolicyValue{})
 	if err != nil {
 		return nil, nil, err
 	}
-	m6, err := bpf.OpenMap(bpf.MapPath(policyMapName6), &PolicyKey6{}, &PolicyValue{})
+	m6, err := bpf.OpenMap(bpf.MapPath(logger, policyMapName6), &PolicyKey6{}, &PolicyValue{})
 	if err != nil {
 		return nil, nil, err
 	}

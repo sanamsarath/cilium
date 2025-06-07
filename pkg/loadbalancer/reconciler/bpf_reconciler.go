@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/pkg/byteorder"
-	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/loadbalancer"
@@ -30,8 +29,6 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer/writer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maglev"
-	"github.com/cilium/cilium/pkg/maps/lbmap"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -55,8 +52,14 @@ func newBPFReconciler(p reconciler.Params, g job.Group, cfg loadbalancer.Config,
 
 	// Use a custom lifecycle to start the reconciler so we can delay it starts until tables are initialized.
 	rlc := &cell.DefaultLifecycle{}
+	started := make(chan struct{})
 	p.Lifecycle.Append(cell.Hook{
 		OnStop: func(ctx cell.HookContext) error {
+			// Since starting happens asynchronously, wait for it to be done before trying to stop.
+			select {
+			case <-ctx.Done():
+			case <-started:
+			}
 			return rlc.Stop(p.Log, ctx)
 		},
 	})
@@ -89,6 +92,7 @@ func newBPFReconciler(p reconciler.Params, g job.Group, cfg loadbalancer.Config,
 
 	g.Add(
 		job.OneShot("start-reconciler", func(ctx context.Context, health cell.Health) error {
+			defer close(started)
 			// We give a short grace period for initializers to finish populating the initial contents
 			// of the tables to avoid scaling down load-balancing due to e.g. seeing services before
 			// the endpoint slices.
@@ -115,7 +119,8 @@ func newBPFReconciler(p reconciler.Params, g job.Group, cfg loadbalancer.Config,
 type BPFOps struct {
 	LBMaps maps.LBMaps
 	log    *slog.Logger
-	cfg    loadbalancer.ExternalConfig
+	cfg    loadbalancer.Config
+	extCfg loadbalancer.ExternalConfig
 	maglev *maglev.Maglev
 
 	serviceIDAlloc     idAllocator
@@ -165,22 +170,23 @@ type backendState struct {
 type bpfOpsParams struct {
 	cell.In
 
-	Lifecycle     cell.Lifecycle
-	Log           *slog.Logger
-	Cfg           loadbalancer.Config
-	ExtCfg        loadbalancer.ExternalConfig
-	LBMaps        maps.LBMaps
-	Maglev        *maglev.Maglev
-	DB            *statedb.DB
-	NodeAddresses statedb.Table[tables.NodeAddress]
+	Lifecycle      cell.Lifecycle
+	Log            *slog.Logger
+	Config         loadbalancer.Config
+	ExternalConfig loadbalancer.ExternalConfig
+	LBMaps         maps.LBMaps
+	Maglev         *maglev.Maglev
+	DB             *statedb.DB
+	NodeAddresses  statedb.Table[tables.NodeAddress]
 }
 
 func newBPFOps(p bpfOpsParams) *BPFOps {
-	if !p.Cfg.EnableExperimentalLB {
+	if !p.Config.EnableExperimentalLB {
 		return nil
 	}
 	ops := &BPFOps{
-		cfg:       p.ExtCfg,
+		cfg:       p.Config,
+		extCfg:    p.ExternalConfig,
 		maglev:    p.Maglev,
 		log:       p.Log,
 		LBMaps:    p.LBMaps,
@@ -206,7 +212,7 @@ func (ops *BPFOps) ResetAndRestore() (err error) {
 	ops.prevSourceRanges = map[loadbalancer.L3n4Addr]sets.Set[netip.Prefix]{}
 
 	// Restore backend IDs
-	err = ops.LBMaps.DumpBackend(func(key lbmap.BackendKey, value lbmap.BackendValue) {
+	err = ops.LBMaps.DumpBackend(func(key maps.BackendKey, value maps.BackendValue) {
 		value = value.ToHost()
 		ops.backendIDAlloc.addID(beValueToAddr(value), loadbalancer.ID(key.GetID()))
 		ops.restoredBackendIDs.Insert(key.GetID())
@@ -216,8 +222,8 @@ func (ops *BPFOps) ResetAndRestore() (err error) {
 	}
 
 	// Gather all services key'd by address.
-	serviceSlots := map[loadbalancer.L3n4Addr][]lbmap.ServiceValue{}
-	err = ops.LBMaps.DumpService(func(key lbmap.ServiceKey, value lbmap.ServiceValue) {
+	serviceSlots := map[loadbalancer.L3n4Addr][]maps.ServiceValue{}
+	err = ops.LBMaps.DumpService(func(key maps.ServiceKey, value maps.ServiceValue) {
 		key = key.ToHost()
 		value = value.ToHost()
 		addr := svcKeyToAddr(key)
@@ -261,7 +267,7 @@ func (ops *BPFOps) ResetAndRestore() (err error) {
 	return nil
 }
 
-func svcKeyToAddr(svcKey lbmap.ServiceKey) loadbalancer.L3n4Addr {
+func svcKeyToAddr(svcKey maps.ServiceKey) loadbalancer.L3n4Addr {
 	feIP := svcKey.GetAddress()
 	feAddrCluster := cmtypes.MustAddrClusterFromIP(feIP)
 	proto := loadbalancer.NewL4TypeFromNumber(svcKey.GetProtocol())
@@ -269,7 +275,7 @@ func svcKeyToAddr(svcKey lbmap.ServiceKey) loadbalancer.L3n4Addr {
 	return *feL3n4Addr
 }
 
-func beValueToAddr(beValue lbmap.BackendValue) loadbalancer.L3n4Addr {
+func beValueToAddr(beValue maps.BackendValue) loadbalancer.L3n4Addr {
 	beIP := beValue.GetAddress()
 	beAddrCluster := cmtypes.MustAddrClusterFromIP(beIP)
 	proto := loadbalancer.NewL4TypeFromNumber(beValue.GetProtocol())
@@ -278,8 +284,8 @@ func beValueToAddr(beValue lbmap.BackendValue) loadbalancer.L3n4Addr {
 }
 
 // Delete implements reconciler.Operations.
-func (ops *BPFOps) Delete(_ context.Context, _ statedb.ReadTxn, fe *loadbalancer.Frontend) error {
-	if (!ops.cfg.EnableIPv6 && fe.Address.IsIPv6()) || (!ops.cfg.EnableIPv4 && !fe.Address.IsIPv6()) {
+func (ops *BPFOps) Delete(_ context.Context, _ statedb.ReadTxn, _ statedb.Revision, fe *loadbalancer.Frontend) error {
+	if (!ops.extCfg.EnableIPv6 && fe.Address.IsIPv6()) || (!ops.extCfg.EnableIPv4 && !fe.Address.IsIPv6()) {
 		return nil
 	}
 
@@ -350,7 +356,7 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 
 	// Delete Maglev.
 	if ops.useMaglev(fe) {
-		if err := ops.LBMaps.DeleteMaglev(lbmap.MaglevOuterKey{RevNatID: uint16(feID)}, fe.Address.IsIPv6()); err != nil {
+		if err := ops.LBMaps.DeleteMaglev(maps.MaglevOuterKey{RevNatID: uint16(feID)}, fe.Address.IsIPv6()); err != nil {
 			return fmt.Errorf("ops.LBMaps.DeleteMaglev failed: %w", err)
 		}
 	}
@@ -373,8 +379,8 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 		ops.releaseBackend(orphanState.id, orphanState.addr)
 	}
 
-	var svcKey lbmap.ServiceKey
-	var revNatKey lbmap.RevNatKey
+	var svcKey maps.ServiceKey
+	var revNatKey maps.RevNatKey
 
 	ip := fe.Address.AddrCluster.AsNetIP()
 	proto, err := u8proto.ParseProtocol(fe.Address.Protocol)
@@ -382,11 +388,11 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 		return fmt.Errorf("invalid L4 protocol %q: %w", fe.Address.Protocol, err)
 	}
 	if fe.Address.IsIPv6() {
-		svcKey = lbmap.NewService6Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
-		revNatKey = lbmap.NewRevNat6Key(uint16(feID))
+		svcKey = maps.NewService6Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
+		revNatKey = maps.NewRevNat6Key(uint16(feID))
 	} else {
-		svcKey = lbmap.NewService4Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
-		revNatKey = lbmap.NewRevNat4Key(uint16(feID))
+		svcKey = maps.NewService4Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
+		revNatKey = maps.NewRevNat4Key(uint16(feID))
 	}
 
 	// Delete all slots including master.
@@ -431,8 +437,8 @@ func (ops *BPFOps) deleteFrontend(fe *loadbalancer.Frontend) error {
 }
 
 func (ops *BPFOps) pruneServiceMaps() error {
-	toDelete := []lbmap.ServiceKey{}
-	svcCB := func(svcKey lbmap.ServiceKey, svcValue lbmap.ServiceValue) {
+	toDelete := []maps.ServiceKey{}
+	svcCB := func(svcKey maps.ServiceKey, svcValue maps.ServiceValue) {
 		svcKey = svcKey.ToHost()
 		svcValue = svcValue.ToHost()
 		ac, ok := cmtypes.AddrClusterFromIP(svcKey.GetAddress())
@@ -477,8 +483,8 @@ func (ops *BPFOps) pruneServiceMaps() error {
 }
 
 func (ops *BPFOps) pruneBackendMaps() error {
-	toDelete := []lbmap.BackendKey{}
-	beCB := func(beKey lbmap.BackendKey, beValue lbmap.BackendValue) {
+	toDelete := []maps.BackendKey{}
+	beCB := func(beKey maps.BackendKey, beValue maps.BackendValue) {
 		beValue = beValue.ToHost()
 		addr := beValueToAddr(beValue)
 		if _, ok := ops.backendStates[addr]; !ok {
@@ -526,8 +532,8 @@ func (ops *BPFOps) pruneRestoredIDs() error {
 }
 
 func (ops *BPFOps) pruneRevNat() error {
-	toDelete := []lbmap.RevNatKey{}
-	cb := func(key lbmap.RevNatKey, value lbmap.RevNatValue) {
+	toDelete := []maps.RevNatKey{}
+	cb := func(key maps.RevNatKey, value maps.RevNatValue) {
 		key = key.ToHost()
 		if _, ok := ops.serviceIDAlloc.entitiesID[loadbalancer.ID(key.GetKey())]; !ok {
 			ops.log.Debug("pruneRevNat: enqueing for deletion", logfields.ID, key.GetKey())
@@ -548,8 +554,8 @@ func (ops *BPFOps) pruneRevNat() error {
 }
 
 func (ops *BPFOps) pruneSourceRanges() error {
-	toDelete := []lbmap.SourceRangeKey{}
-	cb := func(key lbmap.SourceRangeKey, value *lbmap.SourceRangeValue) {
+	toDelete := []maps.SourceRangeKey{}
+	cb := func(key maps.SourceRangeKey, value *maps.SourceRangeValue) {
 		key = key.ToHost()
 
 		// A SourceRange is OK if there's a service with this ID and the
@@ -586,11 +592,11 @@ func (ops *BPFOps) pruneSourceRanges() error {
 
 func (ops *BPFOps) pruneMaglev() error {
 	type outerKeyWithIPVersion struct {
-		lbmap.MaglevOuterKey
+		maps.MaglevOuterKey
 		ipv6 bool
 	}
 	toDelete := []outerKeyWithIPVersion{}
-	cb := func(key lbmap.MaglevOuterKey, _ lbmap.MaglevOuterVal, _ lbmap.MaglevInnerKey, _ *lbmap.MaglevInnerVal, ipv6 bool) {
+	cb := func(key maps.MaglevOuterKey, _ maps.MaglevOuterVal, _ maps.MaglevInnerKey, _ *maps.MaglevInnerVal, ipv6 bool) {
 		if _, ok := ops.serviceIDAlloc.entitiesID[loadbalancer.ID(key.RevNatID)]; !ok {
 			ops.log.Debug("pruneMaglev: enqueing for deletion", logfields.ID, key.RevNatID)
 			toDelete = append(toDelete, outerKeyWithIPVersion{key, ipv6})
@@ -627,8 +633,8 @@ func (ops *BPFOps) Prune(_ context.Context, _ statedb.ReadTxn, _ iter.Seq2[*load
 }
 
 // Update implements reconciler.Operations.
-func (ops *BPFOps) Update(_ context.Context, txn statedb.ReadTxn, fe *loadbalancer.Frontend) error {
-	if (!ops.cfg.EnableIPv6 && fe.Address.IsIPv6()) || (!ops.cfg.EnableIPv4 && !fe.Address.IsIPv6()) {
+func (ops *BPFOps) Update(_ context.Context, txn statedb.ReadTxn, _ statedb.Revision, fe *loadbalancer.Frontend) error {
+	if (!ops.extCfg.EnableIPv6 && fe.Address.IsIPv6()) || (!ops.extCfg.EnableIPv4 && !fe.Address.IsIPv6()) {
 		return nil
 	}
 
@@ -688,6 +694,17 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 	// the operations that depend on the state have been performed. If this invariant is not
 	// followed then we may leak data due to not retrying a failed operation.
 
+	svc := fe.Service
+	proxyDelegation := svc.GetProxyDelegation()
+
+	// Check for invalid feature combinations to catch bugs at the upper layers.
+	switch {
+	case svc.SessionAffinity && svc.ProxyRedirect != nil:
+		return fmt.Errorf("invalid feature combination: SessionAffinity with proxy redirection is not supported")
+	case svc.LoopbackHostPort && proxyDelegation != loadbalancer.SVCProxyDelegationNone:
+		return fmt.Errorf("invalid feature combination: HostPort loopback with proxy delegation is not supported ")
+	}
+
 	// Assign/lookup an identifier for the service. May fail if we have run out of IDs.
 	// The Frontend.ID field is purely for debugging purposes.
 	feID, err := ops.serviceIDAlloc.acquireLocalID(fe.Address, 0)
@@ -696,8 +713,8 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 	}
 	fe.ID = loadbalancer.ServiceID(feID)
 
-	var svcKey lbmap.ServiceKey
-	var svcVal lbmap.ServiceValue
+	var svcKey maps.ServiceKey
+	var svcVal maps.ServiceValue
 
 	proto, err := u8proto.ParseProtocol(fe.Address.Protocol)
 	if err != nil {
@@ -706,11 +723,11 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 
 	ip := fe.Address.AddrCluster.AsNetIP()
 	if fe.Address.IsIPv6() {
-		svcKey = lbmap.NewService6Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
-		svcVal = &lbmap.Service6Value{}
+		svcKey = maps.NewService6Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
+		svcVal = &maps.Service6Value{}
 	} else {
-		svcKey = lbmap.NewService4Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
-		svcVal = &lbmap.Service4Value{}
+		svcKey = maps.NewService4Key(ip, fe.Address.Port, proto, fe.Address.Scope, 0)
+		svcVal = &maps.Service4Value{}
 	}
 
 	svcType := fe.Type
@@ -721,17 +738,24 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 	// isRoutable denotes whether this service can be accessed from outside the cluster.
 	isRoutable := !svcKey.IsSurrogate() &&
 		(svcType != loadbalancer.SVCTypeClusterIP || ops.cfg.ExternalClusterIP)
-	svc := fe.Service
+
+	forwardingMode := loadbalancer.ToSVCForwardingMode(ops.cfg.LBMode)
+	if ops.cfg.LBModeAnnotation && svc.ForwardingMode != loadbalancer.SVCForwardingModeUndef {
+		forwardingMode = svc.ForwardingMode
+	}
+
 	flag := loadbalancer.NewSvcFlag(&loadbalancer.SvcFlagParam{
 		SvcType:          svcType,
 		SvcNatPolicy:     svc.NatPolicy,
+		SvcFwdModeDSR:    forwardingMode == loadbalancer.SVCForwardingModeDSR,
 		SvcExtLocal:      svc.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal,
 		SvcIntLocal:      svc.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal,
 		SessionAffinity:  svc.SessionAffinity,
 		IsRoutable:       isRoutable,
+		SourceRangeDeny:  svc.GetSourceRangesPolicy() == loadbalancer.SVCSourceRangesPolicyDeny,
 		CheckSourceRange: len(svc.SourceRanges) > 0,
 		L7LoadBalancer:   svc.ProxyRedirect.Redirects(fe.ServicePort),
-		LoopbackHostport: svc.LoopbackHostPort,
+		LoopbackHostport: svc.LoopbackHostPort || proxyDelegation != loadbalancer.SVCProxyDelegationNone,
 		Quarantined:      false,
 	})
 	svcVal.SetFlags(flag.UInt16())
@@ -845,6 +869,14 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 		}
 	}
 
+	if activeCount == 0 {
+		// If there are no active backends we can use the terminating backends.
+		// https://github.com/kubernetes/enhancements/tree/master/keps/sig-network/1669-proxy-terminating-endpoints
+		activeCount = terminatingCount
+	} else {
+		inactiveCount += terminatingCount
+	}
+
 	// Update Maglev
 	if ops.useMaglev(fe) {
 		ops.log.Debug("Update Maglev", logfields.FrontendID, feID)
@@ -862,12 +894,11 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 		ops.prevSourceRanges[fe.Address] = prevSourceRanges
 	}
 	orphanSourceRanges := prevSourceRanges.Clone()
-	srcRangeValue := &lbmap.SourceRangeValue{}
-	for _, cidr := range fe.Service.SourceRanges {
-		if cidr.IP.To4() == nil != fe.Address.IsIPv6() {
+	srcRangeValue := &maps.SourceRangeValue{}
+	for _, prefix := range fe.Service.SourceRanges {
+		if prefix.Addr().Is6() != fe.Address.IsIPv6() {
 			continue
 		}
-		prefix := cidrToPrefix(cidr)
 
 		err := ops.LBMaps.UpdateSourceRange(
 			srcRangeKey(prefix, uint16(feID), fe.Address.IsIPv6()),
@@ -909,7 +940,7 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 		logfields.ProxyRedirect, fe.Service.ProxyRedirect,
 		logfields.Address, fe.Address,
 		logfields.Count, backendCount)
-	if err := ops.upsertMaster(svcKey, svcVal, fe, activeCount, terminatingCount, inactiveCount); err != nil {
+	if err := ops.upsertMaster(svcKey, svcVal, fe, activeCount, inactiveCount); err != nil {
 		return fmt.Errorf("upsert service master: %w", err)
 	}
 
@@ -920,7 +951,7 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 			logfields.ID, feID,
 			logfields.Count, backendCount,
 			logfields.Previous, numPreviousBackends)
-		if err := ops.cleanupSlots(svcKey, numPreviousBackends, activeCount+terminatingCount+inactiveCount); err != nil {
+		if err := ops.cleanupSlots(svcKey, numPreviousBackends, activeCount+inactiveCount); err != nil {
 			return fmt.Errorf("cleanup service slots: %w", err)
 		}
 	}
@@ -933,46 +964,50 @@ func (ops *BPFOps) updateFrontend(fe *loadbalancer.Frontend) error {
 }
 
 func (ops *BPFOps) lbAlgorithm(fe *loadbalancer.Frontend) loadbalancer.SVCLoadBalancingAlgorithm {
-	defaultAlgorithm := loadbalancer.ToSVCLoadBalancingAlgorithm(ops.cfg.NodePortAlg)
-	if ops.cfg.LoadBalancerAlgorithmAnnotation {
-		alg := fe.Service.GetLBAlgorithmAnnotation()
-		if alg != loadbalancer.SVCLoadBalancingAlgorithmUndef {
-			return alg
-		}
+	if !ops.cfg.AlgorithmAnnotation {
+		// Use the undefined algorithm to fall back to default when annotations are disabled.
+		return loadbalancer.SVCLoadBalancingAlgorithmUndef
 	}
-	return defaultAlgorithm
+	return fe.Service.GetLBAlgorithmAnnotation()
 }
 
 func (ops *BPFOps) useMaglev(fe *loadbalancer.Frontend) bool {
-	if ops.lbAlgorithm(fe) != loadbalancer.SVCLoadBalancingAlgorithmMaglev {
+	alg := ops.lbAlgorithm(fe)
+	switch {
+	// Wildcarded frontend is not exposed for external traffic.
+	case fe.Address.AddrCluster.IsUnspecified():
 		return false
-	}
+
+	// Maglev algorithm annotation overrides rest of the checks.
+	case alg != loadbalancer.SVCLoadBalancingAlgorithmUndef:
+		return alg == loadbalancer.SVCLoadBalancingAlgorithmMaglev
+
+	case ops.cfg.LBAlgorithm != loadbalancer.LBAlgorithmMaglev:
+		return false
+
 	// Provision the Maglev LUT for ClusterIP only if ExternalClusterIP is
 	// enabled because ClusterIP can also be accessed from outside with this
 	// setting. We don't do it unconditionally to avoid increasing memory
 	// footprint.
-	if fe.Type == loadbalancer.SVCTypeClusterIP && !ops.cfg.ExternalClusterIP {
+	case fe.Type == loadbalancer.SVCTypeClusterIP && !ops.cfg.ExternalClusterIP:
 		return false
-	}
-	// Wildcarded frontend is not exposed for external traffic.
-	if fe.Address.AddrCluster.IsUnspecified() {
-		return false
-	}
-	// Only provision the Maglev LUT for service types which are reachable
-	// from outside the node.
-	switch fe.Type {
-	case loadbalancer.SVCTypeClusterIP,
-		loadbalancer.SVCTypeNodePort,
-		loadbalancer.SVCTypeLoadBalancer,
-		loadbalancer.SVCTypeHostPort,
-		loadbalancer.SVCTypeExternalIPs:
-		return true
-	}
-	return false
 
+	default:
+		// Only provision the Maglev LUT for service types which are reachable
+		// from outside the node.
+		switch fe.Type {
+		case loadbalancer.SVCTypeClusterIP,
+			loadbalancer.SVCTypeNodePort,
+			loadbalancer.SVCTypeLoadBalancer,
+			loadbalancer.SVCTypeHostPort,
+			loadbalancer.SVCTypeExternalIPs:
+			return true
+		}
+		return false
+	}
 }
 
-func (ops *BPFOps) upsertService(svcKey lbmap.ServiceKey, svcVal lbmap.ServiceValue) error {
+func (ops *BPFOps) upsertService(svcKey maps.ServiceKey, svcVal maps.ServiceValue) error {
 	var err error
 	svcKey = svcKey.ToNetwork()
 	svcVal = svcVal.ToNetwork()
@@ -983,22 +1018,15 @@ func (ops *BPFOps) upsertService(svcKey lbmap.ServiceKey, svcVal lbmap.ServiceVa
 			"Unable to update element for LB bpf map: "+
 			"You can resize it with the flag \"--%s\". "+
 			"The resizing might break existing connections to services",
-			svcKey, svcVal, option.LBMapEntriesName)
+			svcKey, svcVal, loadbalancer.LBMapEntriesName)
 	}
 	return err
 }
 
-func (ops *BPFOps) upsertMaster(svcKey lbmap.ServiceKey, svcVal lbmap.ServiceValue, fe *loadbalancer.Frontend, activeBackends, terminatingBackends, inactiveBackends int) error {
+func (ops *BPFOps) upsertMaster(svcKey maps.ServiceKey, svcVal maps.ServiceValue, fe *loadbalancer.Frontend, activeBackends, inactiveBackends int) error {
+	svcVal.SetCount(activeBackends)
+	svcVal.SetQCount(inactiveBackends)
 	svcKey.SetBackendSlot(0)
-	if activeBackends == 0 {
-		// If there are no active backends we can use the terminating backends.
-		// https://github.com/kubernetes/enhancements/tree/master/keps/sig-network/1669-proxy-terminating-endpoints
-		svcVal.SetCount(terminatingBackends)
-		svcVal.SetQCount(inactiveBackends)
-	} else {
-		svcVal.SetCount(activeBackends)
-		svcVal.SetQCount(terminatingBackends + inactiveBackends)
-	}
 	svcVal.SetBackendID(0)
 	svcVal.SetLbAlg(ops.lbAlgorithm(fe))
 
@@ -1016,7 +1044,7 @@ func (ops *BPFOps) upsertMaster(svcKey lbmap.ServiceKey, svcVal lbmap.ServiceVal
 	return ops.upsertService(svcKey, svcVal)
 }
 
-func (ops *BPFOps) cleanupSlots(svcKey lbmap.ServiceKey, oldCount, newCount int) error {
+func (ops *BPFOps) cleanupSlots(svcKey maps.ServiceKey, oldCount, newCount int) error {
 	for i := newCount; i < oldCount; i++ {
 		svcKey.SetBackendSlot(i + 1)
 		err := ops.LBMaps.DeleteService(svcKey.ToNetwork())
@@ -1028,21 +1056,21 @@ func (ops *BPFOps) cleanupSlots(svcKey lbmap.ServiceKey, oldCount, newCount int)
 }
 
 func (ops *BPFOps) upsertBackend(id loadbalancer.BackendID, be *loadbalancer.BackendParams) (err error) {
-	var lbbe lbmap.Backend
+	var lbbe maps.Backend
 	proto, err := u8proto.ParseProtocol(be.Address.Protocol)
 	if err != nil {
 		return fmt.Errorf("invalid L4 protocol %q: %w", be.Address.Protocol, err)
 	}
 
 	if be.Address.AddrCluster.Is6() {
-		lbbe, err = lbmap.NewBackend6V3(id, be.Address.AddrCluster, be.Address.Port, proto,
-			be.State, ops.cfg.GetZoneID(be.Zone))
+		lbbe, err = maps.NewBackend6V3(id, be.Address.AddrCluster, be.Address.Port, proto,
+			be.State, ops.extCfg.GetZoneID(be.Zone))
 		if err != nil {
 			return err
 		}
 	} else {
-		lbbe, err = lbmap.NewBackend4V3(id, be.Address.AddrCluster, be.Address.Port, proto,
-			be.State, ops.cfg.GetZoneID(be.Zone))
+		lbbe, err = maps.NewBackend4V3(id, be.Address.AddrCluster, be.Address.Port, proto,
+			be.State, ops.extCfg.GetZoneID(be.Zone))
 		if err != nil {
 			return err
 		}
@@ -1054,11 +1082,11 @@ func (ops *BPFOps) upsertBackend(id loadbalancer.BackendID, be *loadbalancer.Bac
 }
 
 func (ops *BPFOps) deleteBackend(ipv6 bool, id loadbalancer.BackendID) error {
-	var key lbmap.BackendKey
+	var key maps.BackendKey
 	if ipv6 {
-		key = lbmap.NewBackend6KeyV3(id)
+		key = maps.NewBackend6KeyV3(id)
 	} else {
-		key = lbmap.NewBackend4KeyV3(id)
+		key = maps.NewBackend4KeyV3(id)
 	}
 	err := ops.LBMaps.DeleteBackend(key)
 	if err != nil {
@@ -1068,24 +1096,24 @@ func (ops *BPFOps) deleteBackend(ipv6 bool, id loadbalancer.BackendID) error {
 }
 
 func (ops *BPFOps) upsertAffinityMatch(id loadbalancer.ID, beID loadbalancer.BackendID) error {
-	key := &lbmap.AffinityMatchKey{
+	key := &maps.AffinityMatchKey{
 		BackendID: beID,
 		RevNATID:  uint16(id),
 	}
-	var value lbmap.AffinityMatchValue
+	var value maps.AffinityMatchValue
 	return ops.LBMaps.UpdateAffinityMatch(key.ToNetwork(), &value)
 }
 
 func (ops *BPFOps) deleteAffinityMatch(id loadbalancer.ID, beID loadbalancer.BackendID) error {
-	key := &lbmap.AffinityMatchKey{
+	key := &maps.AffinityMatchKey{
 		BackendID: beID,
 		RevNATID:  uint16(id),
 	}
 	return ops.LBMaps.DeleteAffinityMatch(key.ToNetwork())
 }
 
-func (ops *BPFOps) upsertRevNat(id loadbalancer.ID, svcKey lbmap.ServiceKey, svcVal lbmap.ServiceValue) error {
-	zeroValue := svcVal.New().(lbmap.ServiceValue)
+func (ops *BPFOps) upsertRevNat(id loadbalancer.ID, svcKey maps.ServiceKey, svcVal maps.ServiceValue) error {
+	zeroValue := svcVal.New().(maps.ServiceValue)
 	zeroValue.SetRevNat(int(id))
 	revNATKey := zeroValue.RevNatKey()
 	revNATValue := svcKey.RevNatValue()
@@ -1108,7 +1136,7 @@ type backendWithRevision struct {
 
 func (ops *BPFOps) updateMaglev(fe *loadbalancer.Frontend, feID loadbalancer.ID, activeBackends []backendWithRevision) error {
 	if len(activeBackends) == 0 {
-		if err := ops.LBMaps.DeleteMaglev(lbmap.MaglevOuterKey{RevNatID: uint16(feID)}, fe.Address.IsIPv6()); err != nil {
+		if err := ops.LBMaps.DeleteMaglev(maps.MaglevOuterKey{RevNatID: uint16(feID)}, fe.Address.IsIPv6()); err != nil {
 			return fmt.Errorf("ops.LBMaps.DeleteMaglev failed: %w", err)
 		}
 		return nil
@@ -1117,7 +1145,7 @@ func (ops *BPFOps) updateMaglev(fe *loadbalancer.Frontend, feID loadbalancer.ID,
 	if err != nil {
 		return fmt.Errorf("ops.computeMaglevTable failed: %w", err)
 	}
-	if err := ops.LBMaps.UpdateMaglev(lbmap.MaglevOuterKey{RevNatID: uint16(feID)}, maglevTable, fe.Address.IsIPv6()); err != nil {
+	if err := ops.LBMaps.UpdateMaglev(maps.MaglevOuterKey{RevNatID: uint16(feID)}, maglevTable, fe.Address.IsIPv6()); err != nil {
 		return fmt.Errorf("ops.LBMaps.UpdateMaglev failed: %w", err)
 	}
 	return nil
@@ -1404,7 +1432,7 @@ func newID(svc loadbalancer.L3n4Addr, id loadbalancer.ID) *loadbalancer.L3n4Addr
 	}
 }
 
-func srcRangeKey(cidr netip.Prefix, revNATID uint16, ipv6 bool) lbmap.SourceRangeKey {
+func srcRangeKey(cidr netip.Prefix, revNATID uint16, ipv6 bool) maps.SourceRangeKey {
 	const (
 		lpmPrefixLen4 = 16 + 16 // sizeof(SourceRangeKey4.RevNATID)+sizeof(SourceRangeKey4.Pad)
 		lpmPrefixLen6 = 16 + 16 // sizeof(SourceRangeKey6.RevNATID)+sizeof(SourceRangeKey6.Pad)
@@ -1412,20 +1440,14 @@ func srcRangeKey(cidr netip.Prefix, revNATID uint16, ipv6 bool) lbmap.SourceRang
 	ones := cidr.Bits()
 	id := byteorder.HostToNetwork16(revNATID)
 	if ipv6 {
-		key := &lbmap.SourceRangeKey6{PrefixLen: uint32(ones) + lpmPrefixLen6, RevNATID: id}
+		key := &maps.SourceRangeKey6{PrefixLen: uint32(ones) + lpmPrefixLen6, RevNATID: id}
 		as16 := cidr.Addr().As16()
 		copy(key.Address[:], as16[:])
 		return key
 	} else {
-		key := &lbmap.SourceRangeKey4{PrefixLen: uint32(ones) + lpmPrefixLen4, RevNATID: id}
+		key := &maps.SourceRangeKey4{PrefixLen: uint32(ones) + lpmPrefixLen4, RevNATID: id}
 		as4 := cidr.Addr().As4()
 		copy(key.Address[:], as4[:])
 		return key
 	}
-}
-
-func cidrToPrefix(cidr cidr.CIDR) netip.Prefix {
-	cidrAddr, _ := netip.AddrFromSlice(cidr.IP)
-	ones, _ := cidr.Mask.Size()
-	return netip.PrefixFrom(cidrAddr, ones)
 }

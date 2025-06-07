@@ -5,10 +5,12 @@ package srv6map
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/hive/cell"
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/config/defines"
@@ -78,7 +80,7 @@ func newSIDMap(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*SIDMap],
 		&SIDKey{},
 		&SIDValue{},
 		maxSIDEntries,
-		bpf.BPF_F_NO_PREALLOC,
+		unix.BPF_F_NO_PREALLOC,
 	)
 
 	lc.Append(cell.Hook{
@@ -100,8 +102,8 @@ func newSIDMap(dc *option.DaemonConfig, lc cell.Lifecycle) (bpf.MapOut[*SIDMap],
 }
 
 // OpenSIDMap opens the SIDMap on bpffs
-func OpenSIDMap() (*SIDMap, error) {
-	m, err := bpf.OpenMap(bpf.MapPath(sidMapName), &SIDKey{}, &SIDValue{})
+func OpenSIDMap(logger *slog.Logger) (*SIDMap, error) {
+	m, err := bpf.OpenMap(bpf.MapPath(logger, sidMapName), &SIDKey{}, &SIDValue{})
 	if err != nil {
 		return nil, err
 	}

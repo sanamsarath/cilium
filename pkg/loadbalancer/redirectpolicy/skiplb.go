@@ -31,8 +31,8 @@ import (
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/loadbalancer/legacy/lbmap"
 	lbmaps "github.com/cilium/cilium/pkg/loadbalancer/maps"
-	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -204,7 +204,7 @@ type skiplbOps struct {
 }
 
 // Delete implements reconciler.Operations.
-func (ops *skiplbOps) Delete(ctx context.Context, txn statedb.ReadTxn, d *desiredSkipLB) (err error) {
+func (ops *skiplbOps) Delete(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revision, d *desiredSkipLB) (err error) {
 	if d.NetnsCookie == nil {
 		return nil
 	}
@@ -260,7 +260,7 @@ func (ops *skiplbOps) Prune(ctx context.Context, txn statedb.ReadTxn, objs iter.
 }
 
 // Update implements reconciler.Operations.
-func (ops *skiplbOps) Update(ctx context.Context, txn statedb.ReadTxn, d *desiredSkipLB) (err error) {
+func (ops *skiplbOps) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revision, d *desiredSkipLB) (err error) {
 	if d.NetnsCookie == nil {
 		return nil
 	}
@@ -365,6 +365,7 @@ type TestSkipLBMap lbmap.SkipLBMap
 type skiplbmapParams struct {
 	cell.In
 
+	Logger             *slog.Logger
 	IsEnabled          lrpIsEnabled
 	TestSkipLBMap      TestSkipLBMap `optional:"true"`
 	Lifecycle          cell.Lifecycle
@@ -383,7 +384,7 @@ func newSkipLBMap(p skiplbmapParams) (out bpf.MapOut[lbmap.SkipLBMap], err error
 	}
 
 	var m lbmap.SkipLBMap
-	m, err = lbmap.NewSkipLBMap()
+	m, err = lbmap.NewSkipLBMap(p.Logger)
 	if err != nil {
 		return
 	}

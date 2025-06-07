@@ -11,7 +11,7 @@ import (
 	dpdef "github.com/cilium/cilium/pkg/datapath/linux/config/defines"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
-	"github.com/cilium/cilium/pkg/maglev"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
 )
 
@@ -19,12 +19,12 @@ type WriterParams struct {
 	cell.In
 
 	Log                *slog.Logger
+	LBConfig           loadbalancer.Config
 	NodeMap            nodemap.MapV2
 	NodeAddressing     datapath.NodeAddressing
 	NodeExtraDefines   []dpdef.Map `group:"header-node-defines"`
 	NodeExtraDefineFns []dpdef.Fn  `group:"header-node-define-fns"`
 	Sysctl             sysctl.Sysctl
-	Maglev             *maglev.Maglev
 }
 
 var Cell = cell.Module(

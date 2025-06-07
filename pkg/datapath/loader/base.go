@@ -50,7 +50,6 @@ func (l *loader) writeNetdevHeader(dir string) error {
 	f, err := os.Create(headerPath)
 	if err != nil {
 		return fmt.Errorf("failed to open file %s for writing: %w", headerPath, err)
-
 	}
 	defer f.Close()
 
@@ -218,13 +217,13 @@ func (l *loader) reinitializeIPSec(lnc *datapath.LocalNodeConfiguration) error {
 		return nil
 	}
 
-	spec, err := bpf.LoadCollectionSpec(networkObj)
+	spec, err := bpf.LoadCollectionSpec(l.logger, networkObj)
 	if err != nil {
 		return fmt.Errorf("loading eBPF ELF %s: %w", networkObj, err)
 	}
 
 	var obj networkObjects
-	commit, err := bpf.LoadAndAssign(&obj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(l.logger, &obj, spec, &bpf.CollectionOptions{
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
 		},
@@ -281,9 +280,6 @@ func reinitializeOverlay(ctx context.Context, logger *slog.Logger, lnc *datapath
 
 	// gather compile options for bpf_overlay.c
 	opts := []string{}
-	if option.Config.EnableNodePort {
-		opts = append(opts, "-DDISABLE_LOOPBACK_LB")
-	}
 
 	if err := replaceOverlayDatapath(ctx, logger, lnc, opts, link); err != nil {
 		return fmt.Errorf("failed to load overlay programs: %w", err)
@@ -474,11 +470,11 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		if err := compileWithOptions(ctx, l.logger, "bpf_sock.c", "bpf_sock.o", nil); err != nil {
 			logging.Fatal(l.logger, "failed to compile bpf_sock.c", logfields.Error, err)
 		}
-		if err := socketlb.Enable(l.sysctl); err != nil {
+		if err := socketlb.Enable(l.logger, l.sysctl); err != nil {
 			return err
 		}
 	} else {
-		if err := socketlb.Disable(); err != nil {
+		if err := socketlb.Disable(l.logger); err != nil {
 			return err
 		}
 	}
@@ -493,7 +489,7 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		logging.Fatal(l.logger, "alignchecker compile failed", logfields.Error, err)
 	}
 	// Validate alignments of C and Go equivalent structs
-	alignchecker.RegisterLbStructsToCheck(option.Config.LoadBalancerAlgorithmAnnotation)
+	alignchecker.RegisterLbStructsToCheck(lnc.LBConfig.AlgorithmAnnotation)
 	if err := alignchecker.CheckStructAlignments(defaults.AlignCheckerName); err != nil {
 		logging.Fatal(l.logger, "C and Go structs alignment check failed", logfields.Error, err)
 	}
@@ -522,7 +518,7 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 
 	// Reinstall proxy rules for any running proxies if needed
 	if option.Config.EnableL7Proxy {
-		if err := p.ReinstallRoutingRules(lnc.RouteMTU); err != nil {
+		if err := p.ReinstallRoutingRules(ctx, lnc.RouteMTU); err != nil {
 			return err
 		}
 	}

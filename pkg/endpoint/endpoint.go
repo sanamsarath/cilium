@@ -621,7 +621,7 @@ func createEndpoint(dnsRulesAPI DNSRulesAPI, epBuildQueue EndpointBuildQueue, lo
 		DNSRules:         nil,
 		DNSRulesV2:       nil,
 		DNSHistory:       fqdn.NewDNSCacheWithLimit(option.Config.ToFQDNsMinTTL, option.Config.ToFQDNsMaxIPsPerHost),
-		DNSZombies:       fqdn.NewDNSZombieMappings(option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
+		DNSZombies:       fqdn.NewDNSZombieMappings(logging.DefaultSlogLogger, option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
 		state:            "",
 		status:           NewEndpointStatus(),
 		hasBPFProgram:    make(chan struct{}),
@@ -696,8 +696,9 @@ func CreateIngressEndpoint(dnsRulesAPI DNSRulesAPI, epBuildQueue EndpointBuildQu
 
 	// node.GetIngressIPv4 has been parsed with net.ParseIP() and may be in IPv4 mapped IPv6
 	// address format. Use netipx.FromStdIP() to make sure we get a plain IPv4 address.
-	ep.IPv4, _ = netipx.FromStdIP(node.GetIngressIPv4())
-	ep.IPv6, _ = netip.AddrFromSlice(node.GetIngressIPv6())
+	logger := ep.getLogger()
+	ep.IPv4, _ = netipx.FromStdIP(node.GetIngressIPv4(logger))
+	ep.IPv6, _ = netip.AddrFromSlice(node.GetIngressIPv6(logger))
 
 	ep.setState(StateWaitingForIdentity, "Ingress Endpoint creation")
 
@@ -1630,6 +1631,10 @@ func (e *Endpoint) GetPolicyVersionHandle() *versioned.VersionHandle {
 	return nil
 }
 
+func (e *Endpoint) GetListenerProxyPort(listener string) uint16 {
+	return e.proxy.GetListenerProxyPort(listener)
+}
+
 // getProxyStatistics gets the ProxyStatistics for the flows with the
 // given characteristics, or adds a new one and returns it.
 func (e *Endpoint) getProxyStatistics(key string, l7Protocol string, port uint16, ingress bool, redirectPort uint16) *models.ProxyStatistics {
@@ -2536,8 +2541,7 @@ func (e *Endpoint) Delete(conf DeleteConfig) []error {
 
 		// This is a best-effort attempt to cleanup. We expect there to be one
 		// ingress rule and multiple egress rules. If we find more rules than
-		// expected, then the rules will be left as-is because there was
-		// likely manual intervention.
+		// expected, we delete all rules referring to a per-ENI routing table ID.
 		if e.IPv4.IsValid() {
 			if err := linuxrouting.Delete(e.getLogger(), e.IPv4, option.Config.EgressMultiHomeIPRuleCompat); err != nil {
 				errs = append(errs, fmt.Errorf("unable to delete endpoint routing rules: %w", err))

@@ -15,8 +15,6 @@
 #define TEST_REVNAT		       1
 #define LB_MAGLEV_EXTERNAL
 
-#define DISABLE_LOOPBACK_LB
-
 /* Skip ingress policy checks, not needed to validate hairpin flow */
 #define USE_BPF_PROG_FOR_INGRESS_POLICY
 
@@ -170,8 +168,9 @@ static __always_inline void setup_test(void)
 	 */
 	__u32 affinity_timeout = 0x2000064;
 
-	__lb_v4_add_service(FRONTEND_IP, FRONTEND_PORT, IPPROTO_TCP, LB_MAGLEV_LUT_SIZE,
-			    TEST_REVNAT, true, affinity_timeout);
+	__lb_v4_add_service(FRONTEND_IP, FRONTEND_PORT, IPPROTO_TCP, IPPROTO_TCP,
+			    LB_MAGLEV_LUT_SIZE, TEST_REVNAT, SVC_FLAG_ROUTABLE, 0,
+			    true, affinity_timeout);
 
 	/* Backend ID and slot must start by 1 */
 	__u32 backends[LB_MAGLEV_LUT_SIZE];

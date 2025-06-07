@@ -42,6 +42,7 @@ type PerfParameters struct {
 	Image           string
 	NetQos          bool
 	KernelProfiles  bool
+	Bandwidth       bool
 
 	NodeSelectorServer map[string]string
 	NodeSelectorClient map[string]string
@@ -85,6 +86,7 @@ type Parameters struct {
 	CurlImage                 string
 	JSONMockImage             string
 	TestConnDisruptImage      string
+	EchoImage                 string
 	FRRImage                  string
 	SocatImage                string
 	AgentDaemonSetName        string

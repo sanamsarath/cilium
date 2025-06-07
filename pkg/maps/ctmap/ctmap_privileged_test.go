@@ -11,6 +11,7 @@ import (
 
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/cilium/fake"
+	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/stream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,13 +26,14 @@ import (
 )
 
 func init() {
-	InitMapInfo(true, true, true)
+	InitMapInfo(nil, true, true, true)
 }
 
 func setupCTMap(tb testing.TB) {
 	testutils.PrivilegedTest(tb)
+	logger := hivetest.Logger(tb)
 
-	bpf.CheckOrMountFS("")
+	bpf.CheckOrMountFS(logger, "")
 	err := rlimit.RemoveMemlock()
 	require.NoError(tb, err)
 }
@@ -124,7 +126,7 @@ func TestCtGcIcmp(t *testing.T) {
 	setupCTMap(t)
 
 	// Init maps
-	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	natMap := nat.NewMap(nil, "cilium_nat_any4_test", nat.IPv4, 1000)
 	err := natMap.OpenOrCreate()
 	require.NoError(t, err)
 	defer natMap.Map.Unpin()
@@ -238,7 +240,7 @@ func TestCtGcIcmp(t *testing.T) {
 func TestCtGcTcp(t *testing.T) {
 	setupCTMap(t)
 	// Init maps
-	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	natMap := nat.NewMap(nil, "cilium_nat_any4_test", nat.IPv4, 1000)
 	err := natMap.OpenOrCreate()
 	require.NoError(t, err)
 	defer natMap.Map.Unpin()
@@ -353,7 +355,7 @@ func TestCtGcDsr(t *testing.T) {
 	setupCTMap(t)
 
 	// Init maps
-	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	natMap := nat.NewMap(nil, "cilium_nat_any4_test", nat.IPv4, 1000)
 	err := natMap.OpenOrCreate()
 	require.NoError(t, err)
 	defer natMap.Map.Unpin()
@@ -446,7 +448,7 @@ func TestOrphanNatGC(t *testing.T) {
 	setupCTMap(t)
 
 	// Init maps
-	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	natMap := nat.NewMap(nil, "cilium_nat_any4_test", nat.IPv4, 1000)
 	err := natMap.OpenOrCreate()
 	require.NoError(t, err)
 	defer natMap.Map.Unpin()
@@ -687,7 +689,7 @@ func TestOrphanNatGC(t *testing.T) {
 
 	// Let's check IPv6
 
-	natMapV6 := nat.NewMap("cilium_nat_any6_test", nat.IPv6, 1000)
+	natMapV6 := nat.NewMap(nil, "cilium_nat_any6_test", nat.IPv6, 1000)
 	err = natMapV6.OpenOrCreate()
 	require.NoError(t, err)
 	defer natMapV6.Map.Unpin()
@@ -856,7 +858,7 @@ func benchmarkCtGc(t *testing.B, size int) {
 		t.StopTimer()
 		setupCTMap(t)
 		// Init maps
-		natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, size)
+		natMap := nat.NewMap(nil, "cilium_nat_any4_test", nat.IPv4, size)
 		err := natMap.OpenOrCreate()
 		assert.NoError(t, err)
 		defer natMap.Map.Unpin()

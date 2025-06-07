@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/hive/script"
 	"github.com/cilium/hive/script/scripttest"
+	"github.com/cilium/statedb"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,8 +25,10 @@ import (
 	daemonk8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/bgpv1"
 	"github.com/cilium/cilium/pkg/bgpv1/agent"
+	"github.com/cilium/cilium/pkg/bgpv1/manager"
 	"github.com/cilium/cilium/pkg/bgpv1/test/commands"
-	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/datapath/tables"
+
 	ciliumhive "github.com/cilium/cilium/pkg/hive"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/k8s/client"
@@ -83,18 +86,50 @@ func TestScript(t *testing.T) {
 			}
 		}
 
+		// Create the route and device tables
+		routeTable, err := tables.NewRouteTable()
+		require.NoError(t, err)
+
+		deviceTable, err := tables.NewDeviceTable()
+		require.NoError(t, err)
+
+		// Create a cell that registers the tables with the StateDB
+		registerTablesCell := cell.Module(
+			"register-tables",
+			"Registers the route and device tables with the StateDB",
+			cell.Invoke(func(db *statedb.DB) {
+				err := db.RegisterTable(routeTable)
+				require.NoError(t, err)
+
+				err = db.RegisterTable(deviceTable)
+				require.NoError(t, err)
+			}),
+		)
 		h := ciliumhive.New(
 			client.FakeClientCell,
 			daemonk8s.ResourcesCell,
 			metrics.Cell,
 			bgpv1.Cell,
 
+			// Register the tables with the StateDB
+			registerTablesCell,
+
+			// Provide the route table
+			cell.Provide(func() statedb.Table[*tables.Route] {
+				return routeTable.ToTable()
+			}),
+
+			// Provide the device table
+			cell.Provide(func() statedb.Table[*tables.Device] {
+				return deviceTable.ToTable()
+			}),
+
 			cell.Provide(func() *option.DaemonConfig {
 				// BGP Manager uses the global variable option.Config so we need to set it there as well
 				option.Config = &option.DaemonConfig{
 					EnableBGPControlPlane:     true,
 					BGPSecretsNamespace:       testSecretsNamespace,
-					BGPRouterIDAllocationMode: defaults.BGPRouterIDAllocationMode,
+					BGPRouterIDAllocationMode: option.BGPRouterIDAllocationModeDefault,
 					IPAM:                      *ipam,
 				}
 				return option.Config
@@ -105,6 +140,7 @@ func TestScript(t *testing.T) {
 			}),
 			cell.Invoke(func(m agent.BGPRouterManager) {
 				bgpMgr = m
+				m.(*manager.BGPRouterManager).DestroyRouterOnStop(true) // fully destroy GoBGP server on Stop()
 			}),
 		)
 

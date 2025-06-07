@@ -9,13 +9,20 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
+
+func init() {
+	log = logging.DefaultSlogLogger.With(logfields.LogSubsys, "cilium-dbg")
+}
 
 func TestExpandNestedJSON(t *testing.T) {
 	buf := bytes.NewBufferString("not json at all")
@@ -638,8 +645,9 @@ func TestParsePolicyUpdateArgsHelper(t *testing.T) {
 		},
 	}
 
+	logger := hivetest.Logger(t)
 	for _, tt := range tests {
-		args, err := parsePolicyUpdateArgsHelper(tt.args, tt.isDeny)
+		args, err := parsePolicyUpdateArgsHelper(logger, tt.args, tt.isDeny)
 
 		if tt.invalid {
 			require.Error(t, err)

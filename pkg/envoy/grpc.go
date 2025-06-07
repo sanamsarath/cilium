@@ -9,12 +9,12 @@ import (
 	"net"
 
 	cilium "github.com/cilium/proxy/go/cilium/api"
-	envoy_service_cluster "github.com/cilium/proxy/go/envoy/service/cluster/v3"
-	envoy_service_discovery "github.com/cilium/proxy/go/envoy/service/discovery/v3"
-	envoy_service_endpoint "github.com/cilium/proxy/go/envoy/service/endpoint/v3"
-	envoy_service_listener "github.com/cilium/proxy/go/envoy/service/listener/v3"
-	envoy_service_route "github.com/cilium/proxy/go/envoy/service/route/v3"
-	envoy_service_secret "github.com/cilium/proxy/go/envoy/service/secret/v3"
+	envoy_service_cluster "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
+	envoy_service_discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	envoy_service_endpoint "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
+	envoy_service_listener "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
+	envoy_service_route "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	envoy_service_secret "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
@@ -33,7 +33,7 @@ func (s *xdsServer) startXDSGRPCServer(listener net.Listener, config map[string]
 	grpcServer := grpc.NewServer()
 
 	// xdsServer optionally pauses serving any resources until endpoints have been restored
-	xdsServer := xds.NewServer(config, s.restorerPromise, s.config.metrics)
+	xdsServer := xds.NewServer(s.logger, config, s.restorerPromise, s.config.metrics)
 	dsServer := (*xdsGRPCServer)(xdsServer)
 
 	// TODO: https://github.com/cilium/cilium/issues/5051
@@ -93,9 +93,9 @@ type xdsGRPCServer xds.Server
 
 // TODO: https://github.com/cilium/cilium/issues/5051
 // Implement IncrementalAggregatedResources also to support Incremental xDS.
-//func (s *xdsGRPCServer) StreamAggregatedResources(stream envoy_service_discovery_v3.AggregatedDiscoveryService_StreamAggregatedResourcesServer) error {
+// func (s *xdsGRPCServer) StreamAggregatedResources(stream envoy_service_discovery_v3.AggregatedDiscoveryService_StreamAggregatedResourcesServer) error {
 //	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, xds.AnyTypeURL)
-//}
+// }
 
 func (s *xdsGRPCServer) DeltaListeners(stream envoy_service_listener.ListenerDiscoveryService_DeltaListenersServer) error {
 	return ErrNotImplemented

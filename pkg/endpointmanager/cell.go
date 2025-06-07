@@ -11,6 +11,8 @@ import (
 
 	"github.com/cilium/hive/cell"
 
+	"github.com/cilium/cilium/api/v1/models"
+	endpointapi "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
@@ -36,6 +38,9 @@ var Cell = cell.Module(
 	cell.Provide(newDefaultEndpointManager),
 	cell.Provide(endpoint.NewEndpointBuildQueue),
 	cell.ProvidePrivate(newEndpointSynchronizer),
+	cell.Invoke(
+		registerNamespaceUpdater,
+	),
 )
 
 type EndpointsLookup interface {
@@ -68,6 +73,9 @@ type EndpointsLookup interface {
 
 	// GetEndpoints returns a slice of all endpoints present in endpoint manager.
 	GetEndpoints() []*endpoint.Endpoint
+
+	// GetEndpointList returns a slice of all endpoint models.
+	GetEndpointList(params endpointapi.GetEndpointParams) []*models.Endpoint
 
 	// EndpointExists returns whether the endpoint with id exists.
 	EndpointExists(id uint16) bool
@@ -203,7 +211,7 @@ type endpointManagerOut struct {
 func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 	checker := endpoint.CheckHealth
 
-	mgr := New(p.Logger, p.EPSynchronizer, p.LocalNodeStore, p.Health, p.MonitorAgent)
+	mgr := New(p.Logger, p.MetricsRegistry, p.EPSynchronizer, p.LocalNodeStore, p.Health, p.MonitorAgent)
 	if p.Config.EndpointGCInterval > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		p.Lifecycle.Append(cell.Hook{

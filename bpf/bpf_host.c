@@ -52,7 +52,6 @@
 #include "lib/overloadable.h"
 #include "lib/encrypt.h"
 #include "lib/wireguard.h"
-#include "lib/vxlan.h"
 #include "lib/l2_responder.h"
 #include "lib/vtep.h"
 
@@ -101,18 +100,17 @@ resolve_srcid_ipv6(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 		info = lookup_ip6_remote_endpoint(src, 0);
 		if (info) {
 			*sec_identity = info->sec_identity;
-			if (*sec_identity) {
-				/* When SNAT is enabled on traffic ingressing
-				 * into Cilium, all traffic from the world will
-				 * have a source IP of the host. It will only
-				 * actually be from the host if "srcid_from_proxy"
-				 * (passed into this function) reports the src as
-				 * the host. So we can ignore the ipcache if it
-				 * reports the source as HOST_ID.
-				 */
-				if (*sec_identity != HOST_ID)
-					srcid_from_ipcache = *sec_identity;
-			}
+
+			/* When SNAT is enabled on traffic ingressing
+			 * into Cilium, all traffic from the world will
+			 * have a source IP of the host. It will only
+			 * actually be from the host if "srcid_from_proxy"
+			 * (passed into this function) reports the src as
+			 * the host. So we can ignore the ipcache if it
+			 * reports the source as HOST_ID.
+			 */
+			if (*sec_identity != HOST_ID)
+				srcid_from_ipcache = *sec_identity;
 		}
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED6 : DBG_IP_ID_MAP_FAILED6,
 			   ((__u32 *) src)[3], srcid_from_ipcache);
@@ -250,7 +248,6 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	struct remote_endpoint_info *info = NULL;
 	struct endpoint_info *ep;
 	int ret __maybe_unused;
-	__u8 encrypt_key __maybe_unused = 0;
 	__u32 magic = MARK_MAGIC_IDENTITY;
 	bool from_proxy = false;
 
@@ -361,21 +358,15 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	dst = (union v6addr *) &ip6->daddr;
 	info = lookup_ip6_remote_endpoint(dst, 0);
 
-#ifdef ENABLE_IPSEC
-	/* See IPv4 comment. */
-	if (from_proxy && info)
-		encrypt_key = get_min_encrypt_key(info->key);
-#endif
-
 #ifdef TUNNEL_MODE
 	if (info && info->flag_skip_tunnel)
 		goto skip_tunnel;
 
 	if (info && info->flag_has_tunnel_ep) {
-		return encap_and_redirect_with_nodeid(ctx, info, encrypt_key,
-						      secctx,
+		return encap_and_redirect_with_nodeid(ctx, info, secctx,
 						      info->sec_identity,
-						      &trace);
+						      &trace,
+						      bpf_htons(ETH_P_IPV6));
 	}
 skip_tunnel:
 #endif
@@ -415,14 +406,14 @@ tail_handle_ipv6_cont(struct __ctx_buff *ctx, bool from_host)
 	return ret;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_CONT_FROM_HOST)
+__declare_tail(CILIUM_CALL_IPV6_CONT_FROM_HOST)
 static __always_inline
 int tail_handle_ipv6_cont_from_host(struct __ctx_buff *ctx)
 {
 	return tail_handle_ipv6_cont(ctx, true);
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_CONT_FROM_NETDEV)
+__declare_tail(CILIUM_CALL_IPV6_CONT_FROM_NETDEV)
 static __always_inline
 int tail_handle_ipv6_cont_from_netdev(struct __ctx_buff *ctx)
 {
@@ -466,7 +457,7 @@ tail_handle_ipv6(struct __ctx_buff *ctx, __u32 ipcache_srcid, const bool from_ho
 	return ret;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_FROM_HOST)
+__declare_tail(CILIUM_CALL_IPV6_FROM_HOST)
 int tail_handle_ipv6_from_host(struct __ctx_buff *ctx)
 {
 	__u32 ipcache_srcid = 0;
@@ -478,7 +469,7 @@ int tail_handle_ipv6_from_host(struct __ctx_buff *ctx)
 	return tail_handle_ipv6(ctx, ipcache_srcid, true);
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_FROM_NETDEV)
+__declare_tail(CILIUM_CALL_IPV6_FROM_NETDEV)
 int tail_handle_ipv6_from_netdev(struct __ctx_buff *ctx)
 {
 	return tail_handle_ipv6(ctx, 0, false);
@@ -543,18 +534,16 @@ resolve_srcid_ipv4(struct __ctx_buff *ctx, struct iphdr *ip4,
 		if (info != NULL) {
 			*sec_identity = info->sec_identity;
 
-			if (*sec_identity) {
-				/* When SNAT is enabled on traffic ingressing
-				 * into Cilium, all traffic from the world will
-				 * have a source IP of the host. It will only
-				 * actually be from the host if "srcid_from_proxy"
-				 * (passed into this function) reports the src as
-				 * the host. So we can ignore the ipcache if it
-				 * reports the source as HOST_ID.
-				 */
-				if (*sec_identity != HOST_ID)
-					srcid_from_ipcache = *sec_identity;
-			}
+			/* When SNAT is enabled on traffic ingressing
+			 * into Cilium, all traffic from the world will
+			 * have a source IP of the host. It will only
+			 * actually be from the host if "srcid_from_proxy"
+			 * (passed into this function) reports the src as
+			 * the host. So we can ignore the ipcache if it
+			 * reports the source as HOST_ID.
+			 */
+			if (*sec_identity != HOST_ID)
+				srcid_from_ipcache = *sec_identity;
 		}
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED4 : DBG_IP_ID_MAP_FAILED4,
 			   ip4->saddr, srcid_from_ipcache);
@@ -684,7 +673,6 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	struct remote_endpoint_info *info;
 	struct endpoint_info *ep;
 	int ret __maybe_unused;
-	__u8 encrypt_key __maybe_unused = 0;
 	__u32 magic = MARK_MAGIC_IDENTITY;
 	bool from_proxy = false;
 
@@ -809,7 +797,8 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 			fake_info.flag_has_tunnel_ep = true;
 			return __encap_and_redirect_with_nodeid(ctx, &fake_info,
 								secctx, WORLD_IPV4_ID,
-								WORLD_IPV4_ID, &trace);
+								WORLD_IPV4_ID, &trace,
+								bpf_htons(ETH_P_IP));
 		}
 	}
 skip_vtep:
@@ -817,21 +806,15 @@ skip_vtep:
 
 	info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
 
-#ifdef ENABLE_IPSEC
-	/* We encrypt host to remote pod packets only if they are from proxy. */
-	if (from_proxy && info)
-		encrypt_key = get_min_encrypt_key(info->key);
-#endif
-
 #ifdef TUNNEL_MODE
 	if (info && info->flag_skip_tunnel)
 		goto skip_tunnel;
 
 	if (info && info->flag_has_tunnel_ep) {
-		return encap_and_redirect_with_nodeid(ctx, info, encrypt_key,
-						      secctx,
+		return encap_and_redirect_with_nodeid(ctx, info, secctx,
 						      info->sec_identity,
-						      &trace);
+						      &trace,
+						      bpf_htons(ETH_P_IP));
 	}
 skip_tunnel:
 #endif
@@ -883,14 +866,14 @@ tail_handle_ipv4_cont(struct __ctx_buff *ctx, bool from_host)
 	return ret;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_CONT_FROM_HOST)
+__declare_tail(CILIUM_CALL_IPV4_CONT_FROM_HOST)
 static __always_inline
 int tail_handle_ipv4_cont_from_host(struct __ctx_buff *ctx)
 {
 	return tail_handle_ipv4_cont(ctx, true);
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_CONT_FROM_NETDEV)
+__declare_tail(CILIUM_CALL_IPV4_CONT_FROM_NETDEV)
 static __always_inline
 int tail_handle_ipv4_cont_from_netdev(struct __ctx_buff *ctx)
 {
@@ -934,7 +917,7 @@ tail_handle_ipv4(struct __ctx_buff *ctx, __u32 ipcache_srcid, const bool from_ho
 	return ret;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_FROM_HOST)
+__declare_tail(CILIUM_CALL_IPV4_FROM_HOST)
 int tail_handle_ipv4_from_host(struct __ctx_buff *ctx)
 {
 	__u32 ipcache_srcid = 0;
@@ -946,7 +929,7 @@ int tail_handle_ipv4_from_host(struct __ctx_buff *ctx)
 	return tail_handle_ipv4(ctx, ipcache_srcid, true);
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_FROM_NETDEV)
+__declare_tail(CILIUM_CALL_IPV4_FROM_NETDEV)
 int tail_handle_ipv4_from_netdev(struct __ctx_buff *ctx)
 {
 	return tail_handle_ipv4(ctx, 0, false);
@@ -1020,7 +1003,7 @@ do_netdev_encrypt_encap(struct __ctx_buff *ctx, __be16 proto, __u32 src_id)
 
 	ctx->mark = 0;
 
-	return encap_and_redirect_with_nodeid(ctx, ep, 0, src_id, 0, &trace);
+	return encap_and_redirect_with_nodeid(ctx, ep, src_id, 0, &trace, proto);
 }
 #endif /* ENABLE_IPSEC && TUNNEL_MODE */
 
@@ -1089,7 +1072,7 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, __u32 __maybe_unused identity,
      defined ENABLE_L2_ANNOUNCEMENTS
 	case bpf_htons(ETH_P_ARP):
 		send_trace_notify(ctx, obs_point, UNKNOWN_ID, UNKNOWN_ID, TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, trace.reason, trace.monitor);
+				  ctx->ingress_ifindex, trace.reason, trace.monitor, proto);
 		#ifdef ENABLE_L2_ANNOUNCEMENTS
 			ret = handle_l2_announcement(ctx);
 		#else
@@ -1127,7 +1110,7 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, __u32 __maybe_unused identity,
 # endif /* ENABLE_WIREGUARD */
 
 		send_trace_notify(ctx, obs_point, ipcache_srcid, UNKNOWN_ID, TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, trace.reason, trace.monitor);
+				  ctx->ingress_ifindex, trace.reason, trace.monitor, proto);
 
 		ret = tail_call_internal(ctx, from_host ? CILIUM_CALL_IPV6_FROM_HOST :
 							  CILIUM_CALL_IPV6_FROM_NETDEV,
@@ -1170,7 +1153,7 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, __u32 __maybe_unused identity,
 #endif /* ENABLE_WIREGUARD */
 
 		send_trace_notify(ctx, obs_point, ipcache_srcid, UNKNOWN_ID, TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, trace.reason, trace.monitor);
+				  ctx->ingress_ifindex, trace.reason, trace.monitor, proto);
 
 		ret = tail_call_internal(ctx, from_host ? CILIUM_CALL_IPV4_FROM_HOST :
 							  CILIUM_CALL_IPV4_FROM_NETDEV,
@@ -1186,7 +1169,7 @@ do_netdev(struct __ctx_buff *ctx, __u16 proto, __u32 __maybe_unused identity,
 #endif /* ENABLE_IPV4 */
 	default:
 		send_trace_notify(ctx, obs_point, UNKNOWN_ID, UNKNOWN_ID, TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, trace.reason, trace.monitor);
+				  ctx->ingress_ifindex, trace.reason, trace.monitor, proto);
 #ifdef ENABLE_HOST_FIREWALL
 		ret = send_drop_notify_error(ctx, identity, DROP_UNKNOWN_L3,
 					     METRIC_INGRESS);
@@ -1250,8 +1233,8 @@ int cil_from_netdev(struct __ctx_buff *ctx)
 		goto drop_err;
 #else
 		send_trace_notify(ctx, TRACE_TO_STACK, src_id, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  TRACE_IFINDEX_UNKNOWN, TRACE_REASON_UNKNOWN, 0);
+				  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
+				  TRACE_REASON_UNKNOWN, 0, proto);
 		/* Pass unknown traffic to the stack */
 		return CTX_ACT_OK;
 #endif /* ENABLE_HOST_FIREWALL */
@@ -1304,8 +1287,8 @@ int cil_from_host(struct __ctx_buff *ctx)
 					METRIC_EGRESS);
 #else
 		send_trace_notify(ctx, TRACE_TO_STACK, src_sec_identity, dst_sec_identity,
-				  TRACE_EP_ID_UNKNOWN,
-				  TRACE_IFINDEX_UNKNOWN, TRACE_REASON_UNKNOWN, 0);
+				  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
+				  TRACE_REASON_UNKNOWN, 0, proto);
 		/* Pass unknown traffic to the stack */
 		return CTX_ACT_OK;
 #endif /* ENABLE_HOST_FIREWALL */
@@ -1330,8 +1313,8 @@ int cil_from_host(struct __ctx_buff *ctx)
 		ret = CTX_ACT_OK;
 
 		send_trace_notify(ctx, TRACE_FROM_STACK, identity, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
+				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
+				  TRACE_REASON_ENCRYPTED, 0, proto);
 
 # ifdef TUNNEL_MODE
 		ret = do_netdev_encrypt_encap(ctx, proto, identity);
@@ -1503,7 +1486,7 @@ skip_host_firewall:
 				src_sec_identity = src_ep->sec_id;
 
 			info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
-			if (info && info->sec_identity)
+			if (info)
 				dst_sec_identity = info->sec_identity;
 
 			/* lower-level code expects CT tuple to be flipped: */
@@ -1553,7 +1536,7 @@ skip_host_firewall:
 				src_sec_identity = src_ep->sec_id;
 
 			info = lookup_ip6_remote_endpoint((union v6addr *)&ip6->daddr, 0);
-			if (info && info->sec_identity)
+			if (info)
 				dst_sec_identity = info->sec_identity;
 
 			/* lower-level code expects CT tuple to be flipped: */
@@ -1587,12 +1570,14 @@ skip_egress_gateway:
 
 #if defined(ENABLE_IPSEC)
 	if ((ctx->mark & MARK_MAGIC_HOST_MASK) != MARK_MAGIC_ENCRYPT) {
-		ret =  ipsec_maybe_redirect_to_encrypt(ctx, proto,
-						       src_sec_identity);
+		ret = ipsec_maybe_redirect_to_encrypt(ctx, proto,
+						      src_sec_identity);
 		if (ret == CTX_ACT_REDIRECT)
 			return ret;
 		else if (IS_ERR(ret))
 			goto drop_err;
+	} else {
+		trace.reason |= TRACE_REASON_ENCRYPTED;
 	}
 #endif /* ENABLE_IPSEC */
 
@@ -1659,8 +1644,8 @@ exit:
 		goto drop_err;
 
 	send_trace_notify(ctx, TRACE_TO_NETWORK, src_sec_identity, dst_sec_identity,
-			  TRACE_EP_ID_UNKNOWN,
-			  THIS_INTERFACE_IFINDEX, trace.reason, trace.monitor);
+			  TRACE_EP_ID_UNKNOWN, THIS_INTERFACE_IFINDEX,
+			  trace.reason, trace.monitor, proto);
 
 	return ret;
 
@@ -1813,15 +1798,15 @@ out:
 
 	if (!traced)
 		send_trace_notify(ctx, TRACE_TO_STACK, src_id, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  CILIUM_HOST_IFINDEX, trace.reason, trace.monitor);
+				  TRACE_EP_ID_UNKNOWN, CILIUM_HOST_IFINDEX,
+				  trace.reason, trace.monitor, proto);
 
 	return ret;
 }
 
 #if defined(ENABLE_HOST_FIREWALL)
 #ifdef ENABLE_IPV6
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_TO_HOST_POLICY_ONLY)
+__declare_tail(CILIUM_CALL_IPV6_TO_HOST_POLICY_ONLY)
 static __always_inline
 int tail_ipv6_host_policy_ingress(struct __ctx_buff *ctx)
 {
@@ -1841,15 +1826,15 @@ int tail_ipv6_host_policy_ingress(struct __ctx_buff *ctx)
 
 	if (!traced)
 		send_trace_notify(ctx, TRACE_TO_STACK, src_id, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  CILIUM_HOST_IFINDEX, trace.reason, trace.monitor);
+				  TRACE_EP_ID_UNKNOWN, CILIUM_HOST_IFINDEX,
+				  trace.reason, trace.monitor, bpf_htons(ETH_P_IPV6));
 
 	return ret;
 }
 #endif /* ENABLE_IPV6 */
 
 #ifdef ENABLE_IPV4
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_TO_HOST_POLICY_ONLY)
+__declare_tail(CILIUM_CALL_IPV4_TO_HOST_POLICY_ONLY)
 static __always_inline
 int tail_ipv4_host_policy_ingress(struct __ctx_buff *ctx)
 {
@@ -1869,8 +1854,8 @@ int tail_ipv4_host_policy_ingress(struct __ctx_buff *ctx)
 
 	if (!traced)
 		send_trace_notify(ctx, TRACE_TO_STACK, src_id, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  CILIUM_HOST_IFINDEX, trace.reason, trace.monitor);
+				  TRACE_EP_ID_UNKNOWN, CILIUM_HOST_IFINDEX,
+				  trace.reason, trace.monitor, bpf_htons(ETH_P_IP));
 
 	return ret;
 }
@@ -1995,9 +1980,20 @@ from_host_to_lxc(struct __ctx_buff *ctx, __s8 *ext_err)
  * will tail call into this program to enforce egress and ingress host policies.
  * Packets to the local endpoints will then tail call back to the original
  * bpf_lxc program.
+ *
+ * This program is not attached to a bpf hook directly, but instead inserted
+ * into the global policy tail call map at a fixed index. It is marked as an
+ * entry point since it can be invoked by bpf_lxc as soon as it's inserted into
+ * the map, effectively making this object's code reachable from other parts of
+ * the datapath.
+ *
+ * Care must be taken to insert it at a specific time in the host datapath setup
+ * sequence to ensure no missed tail calls or policy bypass occurs. It is not
+ * marked as a tail call since those programs are inserted automatically in
+ * random order.
  */
 __section_entry
-int handle_lxc_traffic(struct __ctx_buff *ctx __maybe_unused)
+int cil_host_policy(struct __ctx_buff *ctx __maybe_unused)
 {
 #ifdef ENABLE_HOST_FIREWALL
 	bool from_host = ctx_load_meta(ctx, CB_FROM_HOST);

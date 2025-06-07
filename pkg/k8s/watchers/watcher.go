@@ -25,11 +25,11 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/loadbalancer/legacy/redirectpolicy"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/redirectpolicy"
 	"github.com/cilium/cilium/pkg/source"
 )
 
@@ -99,7 +99,6 @@ type cgroupManager interface {
 }
 
 type CacheAccessK8SWatcher interface {
-	GetCachedNamespace(namespace string) (*slim_corev1.Namespace, error)
 	GetCachedPod(namespace, name string) (*slim_corev1.Pod, error)
 }
 
@@ -123,7 +122,6 @@ type K8sWatcher struct {
 	k8sEventReporter          *K8sEventReporter
 	k8sPodWatcher             *K8sPodWatcher
 	k8sCiliumNodeWatcher      *K8sCiliumNodeWatcher
-	k8sNamespaceWatcher       *K8sNamespaceWatcher
 	k8sServiceWatcher         *K8sServiceWatcher
 	k8sEndpointsWatcher       *K8sEndpointsWatcher
 	k8sCiliumLRPWatcher       *K8sCiliumLRPWatcher
@@ -147,7 +145,6 @@ func newWatcher(
 	clientset client.Clientset,
 	k8sPodWatcher *K8sPodWatcher,
 	k8sCiliumNodeWatcher *K8sCiliumNodeWatcher,
-	k8sNamespaceWatcher *K8sNamespaceWatcher,
 	k8sServiceWatcher *K8sServiceWatcher,
 	k8sEndpointsWatcher *K8sEndpointsWatcher,
 	k8sCiliumLRPWatcher *K8sCiliumLRPWatcher,
@@ -164,7 +161,6 @@ func newWatcher(
 		k8sEventReporter:          k8sEventReporter,
 		k8sPodWatcher:             k8sPodWatcher,
 		k8sCiliumNodeWatcher:      k8sCiliumNodeWatcher,
-		k8sNamespaceWatcher:       k8sNamespaceWatcher,
 		k8sServiceWatcher:         k8sServiceWatcher,
 		k8sEndpointsWatcher:       k8sEndpointsWatcher,
 		k8sCiliumLRPWatcher:       k8sCiliumLRPWatcher,
@@ -290,7 +286,7 @@ func (k *K8sWatcher) InitK8sSubsystem(ctx context.Context, cachesSynced chan str
 	go func() {
 		k.logger.Info("Waiting until all pre-existing resources have been received")
 		allResources := append(resources, cachesOnly...)
-		if err := k.k8sResourceSynced.WaitForCacheSyncWithTimeout(option.Config.K8sSyncTimeout, allResources...); err != nil {
+		if err := k.k8sResourceSynced.WaitForCacheSyncWithTimeout(ctx, option.Config.K8sSyncTimeout, allResources...); err != nil {
 			logging.Fatal(k.logger, "Timed out waiting for pre-existing resources to be received; exiting", logfields.Error, err)
 		}
 		close(cachesSynced)
@@ -324,8 +320,6 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 		// Core Cilium
 		case resources.K8sAPIGroupPodV1Core:
 			k.k8sPodWatcher.podsInit(ctx)
-		case resources.K8sAPIGroupNamespaceV1Core:
-			k.k8sNamespaceWatcher.namespacesInit()
 		case k8sAPIGroupCiliumNodeV2:
 			if !k.cfg.KVstoreEnabled() {
 				k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx)
@@ -352,7 +346,6 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 }
 
 func (k *K8sWatcher) StopWatcher() {
-	k.k8sNamespaceWatcher.stopWatcher()
 	k.k8sServiceWatcher.stopWatcher()
 	k.k8sEndpointsWatcher.stopWatcher()
 	k.k8sCiliumLRPWatcher.stopWatcher()
@@ -373,11 +366,6 @@ func (k *K8sWatcher) K8sEventReceived(apiResourceName, scope, action string, val
 // GetCachedPod returns a pod from the local store.
 func (k *K8sWatcher) GetCachedPod(namespace, name string) (*slim_corev1.Pod, error) {
 	return k.k8sPodWatcher.GetCachedPod(namespace, name)
-}
-
-// GetCachedNamespace returns a namespace from the local store.
-func (k *K8sWatcher) GetCachedNamespace(namespace string) (*slim_corev1.Namespace, error) {
-	return k.k8sNamespaceWatcher.GetCachedNamespace(namespace)
 }
 
 func (k *K8sWatcher) RunK8sServiceHandler() {

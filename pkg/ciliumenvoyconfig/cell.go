@@ -10,14 +10,14 @@ import (
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/metrics/metric"
-	"github.com/cilium/cilium/pkg/proxy"
+	"github.com/cilium/cilium/pkg/proxy/proxyports"
 )
 
 var (
 	// Cell implements handling of the Cilium(Clusterwide)EnvoyConfig handling
 	// and backend synchronization towards Envoy.
 	Cell = cell.Module(
-		"ciliumenvoycnofig",
+		"ciliumenvoyconfig",
 		"CiliumEnvoyConfig handling",
 
 		cell.Config(CECConfig{}),
@@ -58,7 +58,7 @@ var (
 	)
 )
 
-func newPortAllocator(proxy *proxy.Proxy) PortAllocator {
+func newPortAllocator(proxy *proxyports.ProxyPorts) PortAllocator {
 	return proxy
 }
 
