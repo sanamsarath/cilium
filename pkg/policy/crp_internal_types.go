@@ -104,7 +104,7 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 	}
 
 	// Helper function to convert v2alpha1 peer rules to internal representation
-	convertIngressRule := func(rules []v2alpha1.IngressResolvedRule) []CRPPeerRule {
+	convertIngressRule := func(rules []v2alpha1.ResolvedIngressRule) []CRPPeerRule {
 		if rules == nil {
 			return nil
 		}
@@ -125,7 +125,30 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 		return ingressRules
 	}
 
-	convertEgressRule := func(rules []v2alpha1.EgressResolvedRule) []CRPPeerRule {
+	// TODO: This is redundant, talks with team to fix crp struct to use v2alpha1.ResolvedIngressRule
+	// type for both ingress and ingress deny rules if the structure is the same.
+	convertIngressDenyRule := func(rules []v2alpha1.ResolvedIngressDenyRule) []CRPPeerRule {
+		if rules == nil {
+			return nil
+		}
+		ingressDenyRules := make([]CRPPeerRule, len(rules))
+		for i, rule := range rules {
+			// Convert slice of peer identities to map for efficient lookup
+			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{})
+			for _, id := range rule.FromIdentities {
+				matchingIdentitiesMap[id] = struct{}{}
+			}
+			ingressDenyRules[i] = CRPPeerRule{
+				MatchingPeerIdentities: matchingIdentitiesMap,
+				ToPorts:                rule.ToPorts,
+				ICMPs:                  rule.ICMPs,
+				FromCIDRs:              rule.FromCIDRs,
+			}
+		}
+		return ingressDenyRules
+	}
+
+	convertEgressRule := func(rules []v2alpha1.ResolvedEgressRule) []CRPPeerRule {
 		if rules == nil {
 			return nil
 		}
@@ -149,10 +172,10 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 	// Create and return the internal CRPRuleSet representation
 	return &ResolvedPolicy{
 		SourcePolicyUID:  sourceUID,
-		IngressRules:     convertIngressRule(spec.IngressRules),
-		IngressDenyRules: convertIngressRule(spec.IngressDenyRules),
-		EgressRules:      convertEgressRule(spec.EgressRules),
-		EgressDenyRules:  convertEgressRule(spec.EgressDenyRules),
+		IngressRules:     convertIngressRule(spec.ResolvedIngressRules),
+		IngressDenyRules: convertIngressDenyRule(spec.ResolvedIngressDenyRules),
+		EgressRules:      convertEgressRule(spec.ResolvedEgressRules),
+		EgressDenyRules:  convertEgressRule(spec.ResolvedEgressDenyRules),
 		AppliesTo:        appliesToIdentitiesMap,
 	}, nil
 }

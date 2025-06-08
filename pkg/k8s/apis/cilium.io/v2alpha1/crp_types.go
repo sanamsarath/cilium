@@ -12,14 +12,12 @@ import (
 
 // Important: Run "make" to regenerate code after modifying this file
 
-//+genclient
-//+genclient:nonNamespaced
-//+k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-//+kubebuilder:resource:categories={cilium},singular="ciliumresolvedpolicy",path="ciliumresolvedpolicies",scope="Cluster",shortName={crp}
-//+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
-
-// CiliumResolvedPolicy is the resolved policy object for CiliumNetworkPolicy, CiliumClusterwideNetworkPolicy, and KubernetesNetworkPolicy
+// +genclient
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:path=ciliumresolvedpolicies,scope=Cluster,shortName=crp,categories={cilium}
 type CiliumResolvedPolicy struct {
 	// +deepequal-gen=false
 	metav1.TypeMeta `json:",inline"`
@@ -31,6 +29,10 @@ type CiliumResolvedPolicy struct {
 
 	// Specs defines the list of resolved policy specs
 	Specs []CiliumResolvedPolicySpec `json:"specs,omitempty"`
+
+	// SourcePolicyRef defines the source policy information
+	// +kubebuilder:validation:Required
+	SourcePolicyRef PolicyRef `json:"sourcePolicyRef"`
 
 	// Status defines the observed state of CiliumResolvedPolicy
 	//
@@ -52,35 +54,31 @@ type CiliumResolvedPolicyList struct {
 
 // CiliumResolvedPolicySpec defines the desired state of CiliumResolvedPolicy
 type CiliumResolvedPolicySpec struct {
-	// PolicyRef defines the source policy information
-	// +kubebuilder:validation:Required
-	PolicyRef PolicyRef `json:"policy"`
-
 	// AppliesTo defines endpoints to which this policy applies
 	// +kubebuilder:validation:Required
 	AppliesTo AppliesTo `json:"appliesTo"`
 
-	// IngressRules defines the ingress rules for this policy
+	// ResolvedIngressRules defines the ingress rules for this policy
 	// +kubebuilder:validation:Optional
-	IngressRules []IngressResolvedRule `json:"ingressRules,omitempty"`
+	ResolvedIngressRules []ResolvedIngressRule `json:"resolvedIngressRules,omitempty"`
 
-	// IngressDenyRules defines the ingress deny rules for this policy
+	// ResolvedIngressDenyRules defines the deny ingress rules for this policy
 	// +kubebuilder:validation:Optional
-	IngressDenyRules []IngressResolvedRule `json:"ingressDenyRules,omitempty"`
+	ResolvedIngressDenyRules []ResolvedIngressDenyRule `json:"resolvedIngressDenyRules,omitempty"`
 
-	// EgressRules defines the egress rules for this policy
+	// ResolvedEgressRules defines the egress rules for this policy
 	// +kubebuilder:validation:Optional
-	EgressRules []EgressResolvedRule `json:"egressRules,omitempty"`
+	ResolvedEgressRules []ResolvedEgressRule `json:"resolvedEgressRules,omitempty"`
 
-	// EgressDenyRules defines the egress deny rules for this policy
+	// ResolvedEgressDenyRules defines the deny egress rules for this policy
 	// +kubebuilder:validation:Optional
-	EgressDenyRules []EgressResolvedRule `json:"egressDenyRules,omitempty"`
+	ResolvedEgressDenyRules []ResolvedEgressRule `json:"resolvedEgressDenyRules,omitempty"`
 }
 
 // CiliumResolvedPolicyStatus defines the observed state of CiliumResolvedPolicy
 type CiliumResolvedPolicyStatus struct {
 	// LastUpdated represents the time when this policy was last updated
-	LastUpdated slimv1.Time `json:"lastUpdated,omitempty"`
+	LastUpdated slimv1.Time `json:"lastUpdated"`
 	SyncState   SyncState   `json:"syncState,omitempty"`
 }
 
@@ -104,30 +102,23 @@ type PolicyRef struct {
 // AppliesTo defines the set of endpoints to which a policy applies
 type AppliesTo struct {
 	// Identities is the list of security identities to which this policy applies
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	Identities identity.NumericIdentitySlice `json:"identities"`
 
-	// PodSelectorLabels is the list of labels that select the pods to which this policy applies
+	// CacheSelector is the string representation of the selector used to select identities
 	// +kubebuilder:validation:Optional
-	PodSelectorLabels []PodSelectorLabel `json:"podSelectorLabels,omitempty"`
+	CacheSelector string `json:"cacheSelector,omitempty"`
 }
 
-// PodSelectorLabel represents a key-value label pair
-type PodSelectorLabel struct {
-	// Key is the label key
-	// +kubebuilder:validation:Required
-	Key string `json:"key"`
-
-	// Value is the label value
+// IngressCommonRule is a rule that shares some of its fields across the
+// ResolvedIngressRule and ResolvedIngressDenyRule. It's publicly exported so the code generators
+// can generate code for this structure.
+//
+// +deepequal-gen=true
+type IngressCommonRule struct {
+	// CacheSelector is the string representation of the selector used to select identities
 	// +kubebuilder:validation:Optional
-	Value string `json:"value,omitempty"`
-}
-
-// IngressRule defines an ingress rule in the policy
-type IngressResolvedRule struct {
-	// RuleIndex is the index of this rule in the original policy
-	// +kubebuilder:validation:Required
-	RuleIndex int `json:"ruleIndex"`
+	CacheSelector string `json:"cacheSelector,omitempty"`
 
 	// FromIdentities lists the source identities allowed by this rule
 	// +kubebuilder:validation:Optional
@@ -136,6 +127,11 @@ type IngressResolvedRule struct {
 	// FromCIDRs lists the source CIDRs allowed by this rule
 	// +kubebuilder:validation:Optional
 	FromCIDRs []string `json:"fromCIDRs,omitempty"`
+}
+
+// ResolvedIngressRule defines an ingress rule in the policy
+type ResolvedIngressRule struct {
+	IngressCommonRule `json:",inline"`
 
 	// ToPorts is a list of destination ports identified by port number and
 	// protocol which the endpoint subject to the rule is allowed to
@@ -149,26 +145,59 @@ type IngressResolvedRule struct {
 	ToPorts api.PortRules `json:"toPorts,omitempty"`
 
 	// ICMPs is a list of ICMP rule identified by type number
-	// which the endpoint subject to the rule is allowed to
-	// receive connections on.
+	// which the endpoint subject to the rule is allowed to connect to.
 	//
 	// Example:
-	// Any endpoint with the label "app=httpd" can only accept incoming
+	// Any endpoint with the label "app=httpd" is allowed to initiate
 	// type 8 ICMP connections.
 	//
 	// +kubebuilder:validation:Optional
 	ICMPs api.ICMPRules `json:"icmps,omitempty"`
 }
 
-// EgressRule defines an egress rule in the policy
-type EgressResolvedRule struct {
-	// RuleIndex is the index of this rule in the original policy
-	// +kubebuilder:validation:Required
-	RuleIndex int `json:"ruleIndex"`
+type ResolvedIngressDenyRule struct {
+	IngressCommonRule `json:",inline"`
+
+	// ToPorts is a list of destination ports identified by port number and
+	// protocol which the endpoint subject to the rule is allowed to
+	// receive connections on.
+	//
+	// Example:
+	// Any endpoint with the label "app=httpd" can only accept incoming
+	// connections on port 80/tcp.
+	//
+	// +kubebuilder:validation:Optional
+	ToPorts api.PortRules `json:"toPorts,omitempty"`
+
+	// ICMPs is a list of ICMP rule identified by type number
+	// which the endpoint subject to the rule is allowed to connect to.
+	//
+	// Example:
+	// Any endpoint with the label "app=httpd" is allowed to initiate
+	// type 8 ICMP connections.
+	//
+	// +kubebuilder:validation:Optional
+	ICMPs api.ICMPRules `json:"icmps,omitempty"`
+}
+
+// EgressCommonRule is a rule that shares some of its fields across the
+// ResolvedEgressRule and ResolvedEgressDenyRule. It's publicly exported so the code generators
+// can generate code for this structure.
+//
+// +deepequal-gen:=true
+type EgressCommonRule struct {
+	// CacheSelector is the string representation of the selector used to select identities
+	// +kubebuilder:validation:Optional
+	CacheSelector string `json:"cacheSelector,omitempty"`
 
 	// ToIdentities lists the destination identities allowed by this rule
 	// +kubebuilder:validation:Optional
 	ToIdentities identity.NumericIdentitySlice `json:"toIdentities,omitempty"`
+}
+
+// ResolvedEgressRule defines an egress rule in the policy
+type ResolvedEgressRule struct {
+	EgressCommonRule `json:",inline"`
 
 	// ToFQDNs lists the destination FQDNs allowed by this rule
 	// +kubebuilder:validation:Optional
@@ -186,11 +215,35 @@ type EgressResolvedRule struct {
 	ToPorts api.PortRules `json:"toPorts,omitempty"`
 
 	// ICMPs is a list of ICMP rule identified by type number
-	// which the endpoint subject to the rule is allowed to
-	// receive connections on.
+	// which the endpoint subject to the rule is allowed to connect to.
 	//
 	// Example:
-	// Any endpoint with the label "app=httpd" can only accept incoming
+	// Any endpoint with the label "app=httpd" is allowed to initiate
+	// type 8 ICMP connections.
+	//
+	// +kubebuilder:validation:Optional
+	ICMPs api.ICMPRules `json:"icmps,omitempty"`
+}
+
+type ResolvedEgressDenyRules struct {
+	EgressCommonRule `json:",inline"`
+
+	// ToPorts is a list of destination ports identified by port number and
+	// protocol which the endpoint subject to the rule is allowed to
+	// connect to.
+	//
+	// Example:
+	// Any endpoint with the label "role=frontend" is allowed to initiate
+	// connections to destination port 8080/tcp
+	//
+	// +kubebuilder:validation:Optional
+	ToPorts api.PortRules `json:"toPorts,omitempty"`
+
+	// ICMPs is a list of ICMP rule identified by type number
+	// which the endpoint subject to the rule is allowed to connect to.
+	//
+	// Example:
+	// Any endpoint with the label "app=httpd" is allowed to initiate
 	// type 8 ICMP connections.
 	//
 	// +kubebuilder:validation:Optional
@@ -224,3 +277,9 @@ const (
 	// +kubebuilder:validation:Enum=KNP
 	PolicyTypeKNP PolicyType = "KNP"
 )
+
+type CiliumResolvedPolicyID struct {
+	SourcePolicyType      PolicyType `json:"sourcePolicyType"`
+	SourcePolicyNamespace string     `json:"sourcePolicyNamespace,omitempty"`
+	SourcePolicyName      string     `json:"sourcePolicyName"`
+}
