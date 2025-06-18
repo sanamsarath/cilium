@@ -2491,7 +2491,7 @@ const (
 	fakePrivateKey = "fake private key"
 )
 
-func (_ *fakeCertificateManager) GetTLSContext(ctx context.Context, tlsCtx *api.TLSContext, ns string) (ca, public, private string, inlineSecrets bool, err error) {
+func (f *fakeCertificateManager) GetTLSContext(ctx context.Context, tlsCtx *api.TLSContext, ns string) (ca, public, private string, inlineSecrets bool, err error) {
 	name := tlsCtx.Secret.Name
 	public = fakePublicKey + " " + name
 	private = fakePrivateKey + " " + name

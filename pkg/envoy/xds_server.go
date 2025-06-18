@@ -1398,6 +1398,112 @@ func (s *xdsServer) getPortNetworkPolicyRule(ep endpoint.EndpointUpdater, versio
 	return r, canShortCircuit
 }
 
+func (s *xdsServer) getPortNetworkPolicyRuleIdentities(ep endpoint.EndpointUpdater, key policy.CachedIdentitiesSelector, l7Rules *policy.PerSelectorPolicy, useFullTLSContext, useSDS bool, policySecretsNamespace string) (*cilium.PortNetworkPolicyRule, bool) {
+	wildcard := key.IsWildcard()
+	r := &cilium.PortNetworkPolicyRule{}
+
+	// Optimize the policy if the endpoint selector is a wildcard by
+	// keeping remote policies list empty to match all remote policies.
+	if !wildcard {
+		ids := key.GetIdentities()
+
+		// No remote policies would match this rule. Discard it.
+		if len(ids) == 0 {
+			return nil, true
+		}
+		r.RemotePolicies = ids.AsUint32Slice()
+	}
+
+	if l7Rules == nil {
+		// L3/L4 only rule, everything in L7 is allowed && no TLS
+		return r, true
+	}
+
+	if l7Rules.IsDeny {
+		r.Deny = true
+		return r, false
+	}
+
+	// Pass redirect port as proxy ID if the rule has an explicit listener reference.
+	// This makes this rule to be ignored on any listener that does not have a matching
+	// proxy ID.
+	if l7Rules.Listener != "" {
+		r.ProxyId = uint32(ep.GetListenerProxyPort(l7Rules.Listener))
+	}
+
+	// If secret synchronization is disabled, policySecretsNamespace will be the empty string.
+	// In that case, useFullTLSContext is used to retain an old, buggy behavior where Secrets may
+	// contain a `ca.crt` field as well, which can lead Envoy to enforce client TLS between the client pod and the interception point in Envoy. In this case,
+	// Secrets will be sent to Envoy via the old, inline-in-NPDS method, and _not_ via SDS.
+	//
+	// If secret synchronization is enabled, useFullTLSContext is unused, as SDS handling can handle Secrets with extra
+	// keys correctly.
+	if l7Rules.TerminatingTLS != nil {
+		r.DownstreamTlsContext = toEnvoyTerminatingTLSContext(l7Rules.TerminatingTLS, policySecretsNamespace, useSDS, useFullTLSContext)
+	}
+
+	if l7Rules.OriginatingTLS != nil {
+		r.UpstreamTlsContext = toEnvoyOriginatingTLSContext(l7Rules.OriginatingTLS, policySecretsNamespace, useSDS, useFullTLSContext)
+	}
+
+	if len(l7Rules.ServerNames) > 0 {
+		r.ServerNames = make([]string, 0, len(l7Rules.ServerNames))
+		for sni := range l7Rules.ServerNames {
+			r.ServerNames = append(r.ServerNames, sni)
+		}
+		slices.Sort(r.ServerNames)
+	}
+
+	// Assume none of the rules have side-effects so that rule evaluation can
+	// be stopped as soon as the first allowing rule is found. 'canShortCircuit'
+	// is set to 'false' below if any rules with side effects are encountered,
+	// causing all the applicable rules to be evaluated instead.
+	canShortCircuit := true
+	switch l7Rules.L7Parser {
+	case policy.ParserTypeHTTP:
+		// 'r.L7' is an interface which must not be set to a typed 'nil',
+		// so check if we have any rules
+		if len(l7Rules.HTTP) > 0 {
+			// Use L7 rules computed earlier?
+			var httpRules *cilium.HttpNetworkPolicyRules
+			if l7Rules.EnvoyHTTPRules != nil {
+				httpRules = l7Rules.EnvoyHTTPRules
+				canShortCircuit = l7Rules.CanShortCircuit
+			} else {
+				httpRules, canShortCircuit = s.l7RulesTranslator.GetEnvoyHTTPRules(&l7Rules.L7Rules, "")
+			}
+			r.L7 = &cilium.PortNetworkPolicyRule_HttpRules{
+				HttpRules: httpRules,
+			}
+		}
+
+	case policy.ParserTypeKafka:
+		// Kafka is implemented as an Envoy Go Extension
+		if len(l7Rules.Kafka) > 0 {
+			// L7 rules are not sorted
+			r.L7Proto = l7Rules.L7Parser.String()
+			r.L7 = &cilium.PortNetworkPolicyRule_KafkaRules{
+				KafkaRules: getKafkaL7Rules(l7Rules.Kafka),
+			}
+		}
+
+	case policy.ParserTypeDNS:
+		// TODO: Support DNS. For now, just ignore any DNS L7 rule.
+
+	default:
+		// Assume unknown parser types use a Key-Value Pair policy
+		if len(l7Rules.L7) > 0 {
+			// L7 rules are not sorted
+			r.L7Proto = l7Rules.L7Parser.String()
+			r.L7 = &cilium.PortNetworkPolicyRule_L7Rules{
+				L7Rules: getL7Rules(l7Rules.L7, r.L7Proto),
+			}
+		}
+	}
+
+	return r, canShortCircuit
+}
+
 // getWildcardNetworkPolicyRule returns the rule for port 0, which
 // will be considered after port-specific rules.
 func (s *xdsServer) getWildcardNetworkPolicyRule(version *versioned.VersionHandle, selectors policy.L7DataMap) *cilium.PortNetworkPolicyRule {
@@ -1465,6 +1571,61 @@ func (s *xdsServer) getWildcardNetworkPolicyRule(version *versioned.VersionHandl
 	}
 }
 
+// getWildcardNetworkPolicyRuleIdentities returns the rule for identity-based L7 rules
+// reading from L7IdentityDataMap instead of L7DataMap.
+func (s *xdsServer) getWildcardNetworkPolicyRuleIdentities(selectors policy.L7IdentityDataMap) *cilium.PortNetworkPolicyRule {
+	// single-entry fast path
+	if len(selectors) == 1 {
+		for key := range selectors {
+			if key.IsWildcard() {
+				return &cilium.PortNetworkPolicyRule{}
+			}
+			ids := key.GetIdentities()
+			if len(ids) == 0 {
+				return nil
+			}
+			return &cilium.PortNetworkPolicyRule{RemotePolicies: ids.AsUint32Slice()}
+		}
+	}
+
+	// multiple entries: collect all IDs
+	var remote []uint32
+	wildcardFound := false
+	total := 0
+	lists := make([][]uint32, 0, len(selectors))
+	for key, entry := range selectors {
+		if key.IsWildcard() {
+			wildcardFound = true
+			break
+		}
+		if entry.IsRedirect() {
+			s.logger.Warn("Identity-based rule unexpectedly requires proxy redirection", logfields.Selector, key)
+		}
+		ids := key.GetIdentities()
+		if len(ids) == 0 {
+			continue
+		}
+		arr := ids.AsUint32Slice()
+		total += len(arr)
+		lists = append(lists, arr)
+	}
+
+	if wildcardFound {
+		// wildcard matches all: empty RemotePolicies
+	} else if total == 0 {
+		return nil
+	} else {
+		remote = make([]uint32, 0, total)
+		for _, arr := range lists {
+			remote = append(remote, arr...)
+		}
+		slices.Sort(remote)
+		r := slices.Compact(remote)
+		remote = r
+	}
+	return &cilium.PortNetworkPolicyRule{RemotePolicies: remote}
+}
+
 func (s *xdsServer) getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Policy policy.L4PolicyMap, policyEnforced bool, useFullTLSContext, useSDS bool, dir string, policySecretsNamespace string) []*cilium.PortNetworkPolicy {
 	// TODO: integrate visibility with enforced policy
 	if !policyEnforced {
@@ -1497,7 +1658,13 @@ func (s *xdsServer) getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Pol
 			}
 		}
 
-		rules := make([]*cilium.PortNetworkPolicyRule, 0, len(l4.PerSelectorPolicies))
+		var rules []*cilium.PortNetworkPolicyRule
+		if option.Config.EnableCentralizedNetworkPolicy {
+			// For centralized network policy, we use the per-identity policies
+			rules = make([]*cilium.PortNetworkPolicyRule, 0, len(l4.PerIdentityPolicies))
+		} else {
+			rules = make([]*cilium.PortNetworkPolicyRule, 0, len(l4.PerSelectorPolicies))
+		}
 		allowAll := false
 
 		// Assume none of the rules have side-effects so that rule evaluation can
@@ -1509,7 +1676,12 @@ func (s *xdsServer) getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Pol
 		if port == 0 {
 			// L3-only rule, must generate L7 allow-all in case there are other
 			// port-specific rules. Otherwise traffic from allowed remotes could be dropped.
-			rule := s.getWildcardNetworkPolicyRule(version, l4.PerSelectorPolicies)
+			var rule *cilium.PortNetworkPolicyRule
+			if option.Config.EnableCentralizedNetworkPolicy {
+				rule = s.getWildcardNetworkPolicyRuleIdentities(l4.PerIdentityPolicies)
+			} else {
+				rule = s.getWildcardNetworkPolicyRule(version, l4.PerSelectorPolicies)
+			}
 			if rule != nil {
 				s.logger.Debug("Wildcard PortNetworkPolicyRule matching remote IDs",
 					logfields.EndpointID, ep.GetID(),
@@ -1527,29 +1699,60 @@ func (s *xdsServer) getDirectionNetworkPolicy(ep endpoint.EndpointUpdater, l4Pol
 				rules = append(rules, rule)
 			}
 		} else {
-			for sel, l7 := range l4.PerSelectorPolicies {
-				rule, cs := s.getPortNetworkPolicyRule(ep, version, sel, l7, useFullTLSContext, useSDS, policySecretsNamespace)
-				if rule != nil {
-					if !cs {
-						canShortCircuit = false
-					}
+			if option.Config.EnableCentralizedNetworkPolicy {
+				// For centralized network policy, we use the per-identity policies
+				// and iterate over them.
+				for key, l7 := range l4.PerIdentityPolicies {
+					rule, cs := s.getPortNetworkPolicyRuleIdentities(ep, key, l7, useFullTLSContext, useSDS, policySecretsNamespace)
+					if rule != nil {
+						if !cs {
+							canShortCircuit = false
+						}
 
-					s.logger.Debug("PortNetworkPolicyRule matching remote IDs",
-						logfields.EndpointID, ep.GetID(),
-						logfields.Version, version,
-						logfields.TrafficDirection, dir,
-						logfields.Port, port,
-						logfields.ProxyPort, rule.ProxyId,
-						logfields.PolicyID, rule.RemotePolicies,
-						logfields.ServerNames, rule.ServerNames,
-					)
-
-					if len(rule.RemotePolicies) == 0 && rule.L7 == nil && rule.DownstreamTlsContext == nil && rule.UpstreamTlsContext == nil && len(rule.ServerNames) == 0 && rule.ProxyId == 0 {
-						// Got an allow-all rule, which can short-circuit all of
-						// the other rules.
-						allowAll = true
+						s.logger.Debug("PortNetworkPolicyRule matching remote IDs",
+							logfields.EndpointID, ep.GetID(),
+							logfields.Version, version,
+							logfields.TrafficDirection, dir,
+							logfields.Port, port,
+							logfields.ProxyPort, rule.ProxyId,
+							logfields.PolicyID, rule.RemotePolicies,
+							logfields.ServerNames, rule.ServerNames,
+						)
+						if len(rule.RemotePolicies) == 0 && rule.L7 == nil && rule.DownstreamTlsContext == nil && rule.UpstreamTlsContext == nil && len(rule.ServerNames) == 0 && rule.ProxyId == 0 {
+							// Got an allow-all rule, which can short-circuit all of
+							// the other rules.
+							allowAll = true
+						}
+						rules = append(rules, rule)
 					}
-					rules = append(rules, rule)
+				}
+			} else {
+				// For non-centralized network policy, we use the per-selector policies
+				// and iterate over them.
+				for sel, l7 := range l4.PerSelectorPolicies {
+					rule, cs := s.getPortNetworkPolicyRule(ep, version, sel, l7, useFullTLSContext, useSDS, policySecretsNamespace)
+					if rule != nil {
+						if !cs {
+							canShortCircuit = false
+						}
+
+						s.logger.Debug("PortNetworkPolicyRule matching remote IDs",
+							logfields.EndpointID, ep.GetID(),
+							logfields.Version, version,
+							logfields.TrafficDirection, dir,
+							logfields.Port, port,
+							logfields.ProxyPort, rule.ProxyId,
+							logfields.PolicyID, rule.RemotePolicies,
+							logfields.ServerNames, rule.ServerNames,
+						)
+
+						if len(rule.RemotePolicies) == 0 && rule.L7 == nil && rule.DownstreamTlsContext == nil && rule.UpstreamTlsContext == nil && len(rule.ServerNames) == 0 && rule.ProxyId == 0 {
+							// Got an allow-all rule, which can short-circuit all of
+							// the other rules.
+							allowAll = true
+						}
+						rules = append(rules, rule)
+					}
 				}
 			}
 		}

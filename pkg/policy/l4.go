@@ -24,7 +24,6 @@ import (
 	"github.com/cilium/cilium/pkg/container/versioned"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/iana"
-	"github.com/cilium/cilium/pkg/identity"
 	identityPkg "github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
@@ -295,8 +294,8 @@ func (l7 L7DataMap) MarshalJSON() ([]byte, error) {
 	return buffer.Bytes(), err
 }
 
-// L7IdentityDataMap contains a map of L7 rules per identity where key is a string
-type L7IdentityDataMap map[string]*PerSelectorPolicy
+// L7IdentityDataMap contains a map of L7 rules per identity where key implements CachedIdentities
+type L7IdentityDataMap map[CachedIdentitiesSelector]*PerSelectorPolicy
 
 func (l7 L7IdentityDataMap) MarshalJSON() ([]byte, error) {
 	if len(l7) == 0 {
@@ -305,20 +304,20 @@ func (l7 L7IdentityDataMap) MarshalJSON() ([]byte, error) {
 
 	/* First, create a sorted slice of the identities so we can get
 	 * consistent JSON output */
-	identities := make([]string, 0, len(l7))
-	for id := range l7 {
-		identities = append(identities, id)
+	idselList := make(CachedIdentitiesSelectorSlice, 0, len(l7))
+	for idsel := range l7 {
+		idselList = append(idselList, idsel)
 	}
-	sort.Strings(identities)
+	sort.Sort(idselList)
 
 	/* Now we can iterate the slice and generate JSON entries. */
 	var err error
 	buffer := bytes.NewBufferString("[")
-	for _, id := range identities {
+	for _, idsel := range idselList {
 		buffer.WriteString("{\"")
-		buffer.WriteString(id)
+		buffer.WriteString(idsel.String())
 		buffer.WriteString("\":")
-		b, err := json.Marshal(l7[id])
+		b, err := json.Marshal(l7[idsel])
 		if err == nil {
 			buffer.Write(b)
 		} else {
@@ -418,8 +417,6 @@ func (l7 L7ParserType) defaultPriority() ListenerPriority {
 		return ListenerPriorityHTTP
 	case ParserTypeKafka:
 		return ListenerPriorityKafka
-	default: // proxylib parsers
-		return ListenerPriorityProxylib
 	case ParserTypeTLS:
 		return ListenerPriorityTLS
 	case ParserTypeDNS:
@@ -427,6 +424,8 @@ func (l7 L7ParserType) defaultPriority() ListenerPriority {
 	case ParserTypeCRD:
 		// CRD type can have an explicit higher priority in range 1-100
 		return ListenerPriorityCRD
+	default: // proxylib parsers
+		return ListenerPriorityProxylib
 	}
 }
 
@@ -984,14 +983,15 @@ func (l4 *L4Filter) toMapStateId(logger *slog.Logger, p *EndpointPolicy, feature
 
 	// Compute and insert the wildcard entry, if present
 	if l4.wildcardId {
-		currentRule := l4.PerIdentityPolicies["0"]
-		// single ruleorigin for wildcard
+		// wildcard identity set {0}
+		wildcardKey := NewIdentitySelector(identityPkg.NumericIdentitySlice{identityPkg.InvalidIdentity})
+		currentRule := l4.PerIdentityPolicies[wildcardKey]
 		derivedFrom := singleRuleOrigin(EmptyStringLabels)
 		wildcardEntry = makeEntry(derivedFrom, currentRule)
 
 		if !wildcardEntry.Invalid {
 			for _, keyToAdd := range keysToAdd {
-				keyToAdd.Identity = 0
+				keyToAdd.Identity = identityPkg.InvalidIdentity
 				p.policyMapState.insertWithChanges(keyToAdd, wildcardEntry, features, changes)
 
 				if port == 0 {
@@ -1009,9 +1009,9 @@ func (l4 *L4Filter) toMapStateId(logger *slog.Logger, p *EndpointPolicy, feature
 		}
 	}
 
-	for id, currentRule := range l4.PerIdentityPolicies {
-		// is this wildcard? If so, we already added it above
-		if l4.wildcardId && id == "0" {
+	for key, currentRule := range l4.PerIdentityPolicies {
+		// skip wildcard entry
+		if l4.wildcardId && key.String() == "0" {
 			continue
 		}
 
@@ -1030,15 +1030,8 @@ func (l4 *L4Filter) toMapStateId(logger *slog.Logger, p *EndpointPolicy, feature
 			continue
 		}
 
-		idents, err := ParseIdentityKey(id)
-		if err != nil {
-			scopedLog.Error(
-				"ToMapStateId: Failed to parse identity key",
-				logfields.Error, err,
-				logfields.EndpointSelector, id,
-			)
-			continue
-		}
+		// get numeric identities from key
+		idents := key.GetIdentities()
 
 		if option.Config.Debug {
 			if entry.IsDeny() {
@@ -1056,19 +1049,21 @@ func (l4 *L4Filter) toMapStateId(logger *slog.Logger, p *EndpointPolicy, feature
 			}
 		}
 
-		for id := range idents {
+		for _, id := range idents {
 			for _, keyToAdd := range keysToAdd {
-				keyToAdd.Identity = id
-				p.policyMapState.insertWithChanges(keyToAdd, entry, features, changes)
 				// If Cilium is in dual-stack mode then the "World" identity
 				// needs to be split into two identities to represent World
 				// IPv6 and IPv4 traffic distinctly from one another.
-				if id == identity.ReservedIdentityWorld && option.Config.IsDualStack() {
-					keyToAdd.Identity = identity.ReservedIdentityWorldIPv4
+				if id == identityPkg.ReservedIdentityWorld && option.Config.IsDualStack() {
+					keyToAdd.Identity = identityPkg.ReservedIdentityWorldIPv4
 					p.policyMapState.insertWithChanges(keyToAdd, entry, features, changes)
-					keyToAdd.Identity = identity.ReservedIdentityWorldIPv6
+					keyToAdd.Identity = identityPkg.ReservedIdentityWorldIPv6
 					p.policyMapState.insertWithChanges(keyToAdd, entry, features, changes)
+					continue
 				}
+				// For all other identities, we can just use the identity as is.
+				keyToAdd.Identity = id
+				p.policyMapState.insertWithChanges(keyToAdd, entry, features, changes)
 			}
 		}
 	}
@@ -1081,7 +1076,7 @@ func (l4 *L4Filter) toMapStateId(logger *slog.Logger, p *EndpointPolicy, feature
 //
 // The caller is responsible for making sure the same identity is not
 // present in both 'added' and 'deleted'.
-func (l4 *L4Filter) IdentitySelectionUpdated(logger *slog.Logger, cs types.CachedSelector, added, deleted []identity.NumericIdentity) {
+func (l4 *L4Filter) IdentitySelectionUpdated(logger *slog.Logger, cs types.CachedSelector, added, deleted []identityPkg.NumericIdentity) {
 	logger.Debug(
 		"identities selected by L4Filter updated",
 		logfields.EndpointSelector, cs,
@@ -1418,14 +1413,20 @@ func createL4FilterFromIdentities(policyCtx PolicyContext, peerEndpoints map[ide
 	// If peerEndpoints has "0", it means that the policy applies to all endpoints(wildcard).
 	// peerEndpoints list with wild card identity is expected to have only one entry with identity 0.
 	// If there are other identities in the map, we can ignore them as wildcard supersets them.
-	if _, ok := peerEndpoints[0]; ok {
+	if _, ok := peerEndpoints[identityPkg.InvalidIdentity]; ok {
+		// wildcard identity applies to all
 		l4.wildcardId = true
-		l4.PerIdentityPolicies["0"] = nil // no per-identity policy (yet)
+		wildcardKey := NewIdentitySelector(identityPkg.NumericIdentitySlice{identityPkg.InvalidIdentity})
+		l4.PerIdentityPolicies[wildcardKey] = nil // no per-identity policy (yet)
 	} else {
-		// stringify the peerEndpoint identities from the map
-		idsel := MakeKeyFromIdentitySet(peerEndpoints)
-		// cache the identity selector - PerSelectorPolicies will be added later
-		l4.PerIdentityPolicies[idsel] = nil
+		// collect numeric identities into a slice
+		ids := make(identityPkg.NumericIdentitySlice, 0, len(peerEndpoints))
+		for id := range peerEndpoints {
+			ids = append(ids, identityPkg.NumericIdentity(id))
+		}
+		selKey := NewIdentitySelector(ids)
+		// cache the identity selector
+		l4.PerIdentityPolicies[selKey] = nil
 	}
 
 	var l7Parser L7ParserType
@@ -1645,7 +1646,7 @@ func createL4IngressFilter(policyCtx PolicyContext, fromEndpoints api.EndpointSe
 	// everything from host, then wildcard Host at L7.
 	if len(hostWildcardL7) > 0 {
 		for cs, l7 := range filter.PerSelectorPolicies {
-			if l7.IsRedirect() && cs.Selects(versioned.Latest(), identity.ReservedIdentityHost) {
+			if l7.IsRedirect() && cs.Selects(versioned.Latest(), identityPkg.ReservedIdentityHost) {
 				for _, name := range hostWildcardL7 {
 					selector := api.ReservedEndpointSelectors[name]
 					filter.cacheIdentitySelector(selector, ruleLabels, policyCtx.GetSelectorCache())
@@ -1657,7 +1658,7 @@ func createL4IngressFilter(policyCtx PolicyContext, fromEndpoints api.EndpointSe
 	return filter, nil
 }
 
-func createL4IngressFilterFromIdentities(policyCtx PolicyContext, fromEndpoints map[identity.NumericIdentity]struct{}, auth *api.Authentication, hostWildcardL7 []string, rule api.Ports, port api.PortProtocol,
+func createL4IngressFilterFromIdentities(policyCtx PolicyContext, fromEndpoints map[identityPkg.NumericIdentity]struct{}, auth *api.Authentication, hostWildcardL7 []string, rule api.Ports, port api.PortProtocol,
 	protocol api.L4Proto, ruleLabels stringLabels,
 ) (*L4Filter, error) {
 	filter, err := createL4FilterFromIdentities(policyCtx, fromEndpoints, auth, rule, port, protocol, ruleLabels, true, nil)
@@ -1673,7 +1674,7 @@ func createL4IngressFilterFromIdentities(policyCtx PolicyContext, fromEndpoints 
 		// from the controller.
 
 		// for cs, l7 := range filter.PerSelectorPolicies {
-		// 	if l7.IsRedirect() && cs.Selects(versioned.Latest(), identity.ReservedIdentityHost) {
+		// 	if l7.IsRedirect() && cs.Selects(versioned.Latest(), identityPkg.ReservedIdentityHost) {
 		// 		for _, name := range hostWildcardL7 {
 		// 			selector := api.ReservedEndpointSelectors[name]
 		// 			filter.cacheIdentitySelector(selector, ruleLabels, policyCtx.GetSelectorCache())
@@ -1685,7 +1686,7 @@ func createL4IngressFilterFromIdentities(policyCtx PolicyContext, fromEndpoints 
 	return filter, nil
 }
 
-func createL4EgressFilterFromIdentities(policyCtx PolicyContext, toEndpoints map[identity.NumericIdentity]struct{}, auth *api.Authentication, rule api.Ports, port api.PortProtocol,
+func createL4EgressFilterFromIdentities(policyCtx PolicyContext, toEndpoints map[identityPkg.NumericIdentity]struct{}, auth *api.Authentication, rule api.Ports, port api.PortProtocol,
 	protocol api.L4Proto, ruleLabels stringLabels,
 ) (*L4Filter, error) {
 	return createL4FilterFromIdentities(policyCtx, toEndpoints, auth, rule, port, protocol, ruleLabels, false, nil)
@@ -1701,7 +1702,7 @@ func createL4EgressFilter(policyCtx PolicyContext, toEndpoints api.EndpointSelec
 	return createL4Filter(policyCtx, toEndpoints, auth, rule, port, protocol, ruleLabels, false, fqdns)
 }
 
-func createL4EgressFilterFromIdentitites(policyCtx PolicyContext, toEndpoints map[identity.NumericIdentity]struct{}, auth *api.Authentication, rule api.Ports, port api.PortProtocol,
+func createL4EgressFilterFromIdentitites(policyCtx PolicyContext, toEndpoints map[identityPkg.NumericIdentity]struct{}, auth *api.Authentication, rule api.Ports, port api.PortProtocol,
 	protocol api.L4Proto, ruleLabels stringLabels, fqdns api.FQDNSelectorSlice,
 ) (*L4Filter, error) {
 	return createL4FilterFromIdentities(policyCtx, toEndpoints, auth, rule, port, protocol, ruleLabels, false, fqdns)
@@ -2213,7 +2214,7 @@ func (l4 *L4Policy) removeUser(user *EndpointPolicy) {
 //
 // The caller is responsible for making sure the same identity is not
 // present in both 'adds' and 'deletes'.
-func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter, cs CachedSelector, adds, deletes []identity.NumericIdentity) {
+func (l4Policy *L4Policy) AccumulateMapChanges(logger *slog.Logger, l4 *L4Filter, cs CachedSelector, adds, deletes []identityPkg.NumericIdentity) {
 	port := uint16(l4.Port)
 	proto := l4.U8Proto
 	derivedFrom := l4.RuleOrigin[cs]

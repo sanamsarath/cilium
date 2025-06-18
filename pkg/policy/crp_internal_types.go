@@ -650,11 +650,11 @@ func mergeEgressWithIdentities(policyCtx PolicyContext, toEndpoints map[identity
 // with the L7-related data already in the existing filter, filters store
 // L7rules in PerIdentitiesPolicies, and no selectors are used in this case.
 func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filterToMerge *L4Filter) (err error) {
-	for idset, newL7Rules := range filterToMerge.PerIdentityPolicies {
+	for cachedIds, newL7Rules := range filterToMerge.PerIdentityPolicies {
 		// delete the idset from the filter to merge
-		delete(filterToMerge.PerIdentityPolicies, idset)
+		delete(filterToMerge.PerIdentityPolicies, cachedIds)
 
-		if l7Rules, ok := existingFilter.PerIdentityPolicies[idset]; ok {
+		if l7Rules, ok := existingFilter.PerIdentityPolicies[cachedIds]; ok {
 			// existing filter already has 'idset' in it, merge the rules
 			if l7Rules.Equal(newL7Rules) {
 				continue // identical rules need no merging
@@ -668,7 +668,7 @@ func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filte
 			} else if newL7Rules != nil && newL7Rules.IsDeny {
 				// Overwrite existing filter if the new rule is a deny case
 				// Denies takes priority over any rule.
-				existingFilter.PerIdentityPolicies[idset] = newL7Rules
+				existingFilter.PerIdentityPolicies[cachedIds] = newL7Rules
 				continue
 			}
 
@@ -701,7 +701,7 @@ func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filte
 				}
 			} else if !newL7Rules.TerminatingTLS.Equal(l7Rules.TerminatingTLS) {
 				policyCtx.PolicyTrace("   Merge conflict: mismatching terminating TLS contexts %v/%v\n", newL7Rules.TerminatingTLS, l7Rules.TerminatingTLS)
-				return fmt.Errorf("cannot merge conflicting terminating TLS contexts for cached selector %s: (%v/%v)", idset, newL7Rules.TerminatingTLS, l7Rules.TerminatingTLS)
+				return fmt.Errorf("cannot merge conflicting terminating TLS contexts for cached selector %s: (%v/%v)", cachedIds.String(), newL7Rules.TerminatingTLS, l7Rules.TerminatingTLS)
 			}
 			if l7Rules.OriginatingTLS == nil || newL7Rules.OriginatingTLS == nil {
 				if newL7Rules.OriginatingTLS != nil {
@@ -709,7 +709,7 @@ func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filte
 				}
 			} else if !newL7Rules.OriginatingTLS.Equal(l7Rules.OriginatingTLS) {
 				policyCtx.PolicyTrace("   Merge conflict: mismatching originating TLS contexts %v/%v\n", newL7Rules.OriginatingTLS, l7Rules.OriginatingTLS)
-				return fmt.Errorf("cannot merge conflicting originating TLS contexts for cached selector %s: (%v/%v)", idset, newL7Rules.OriginatingTLS, l7Rules.OriginatingTLS)
+				return fmt.Errorf("cannot merge conflicting originating TLS contexts for cached selector %s: (%v/%v)", cachedIds.String(), newL7Rules.OriginatingTLS, l7Rules.OriginatingTLS)
 			}
 
 			// For now we simply merge the set of allowed SNIs from different rules
@@ -740,7 +740,7 @@ func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filte
 			// terminated
 			if len(l7Rules.ServerNames) > 0 && !l7Rules.L7Rules.IsEmpty() && l7Rules.TerminatingTLS == nil {
 				policyCtx.PolicyTrace("   Merge conflict: cannot use SNI filtering with L7 rules without TLS termination: %v\n", l7Rules.ServerNames)
-				return fmt.Errorf("cannot merge L7 rules for cached selector %s with SNI filtering without TLS termination: %v", idset, l7Rules.ServerNames)
+				return fmt.Errorf("cannot merge L7 rules for cached selector %s with SNI filtering without TLS termination: %v", cachedIds.String(), l7Rules.ServerNames)
 			}
 
 			// empty L7 rules effectively wildcard L7. When merging with a non-empty
@@ -748,12 +748,12 @@ func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filte
 			// specific L7
 			if !l7Rules.HasL7Rules() && newL7Rules.HasL7Rules() {
 				l7Rules.L7Rules = newL7Rules.appendL7WildcardRule(policyCtx)
-				existingFilter.PerIdentityPolicies[idset] = l7Rules
+				existingFilter.PerIdentityPolicies[cachedIds] = l7Rules
 				continue
 			}
 			if l7Rules.HasL7Rules() && !newL7Rules.HasL7Rules() {
 				l7Rules.appendL7WildcardRule(policyCtx)
-				existingFilter.PerIdentityPolicies[idset] = l7Rules
+				existingFilter.PerIdentityPolicies[cachedIds] = l7Rules
 				continue
 			}
 
@@ -784,13 +784,13 @@ func mergePortProtoWithIdentities(policyCtx PolicyContext, existingFilter, filte
 				}
 			}
 			// Update the pointer in the map in case it was newly allocated
-			existingFilter.PerIdentityPolicies[idset] = l7Rules
+			existingFilter.PerIdentityPolicies[cachedIds] = l7Rules
 		} else { // 'idset' is not in the existing filter, add it
 
 			// Move L7 rules over.
-			existingFilter.PerIdentityPolicies[idset] = newL7Rules
+			existingFilter.PerIdentityPolicies[cachedIds] = newL7Rules
 
-			if idset == "0" {
+			if cachedIds.String() == "0" {
 				existingFilter.wildcardId = true
 			}
 		}

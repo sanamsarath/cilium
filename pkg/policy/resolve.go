@@ -513,7 +513,7 @@ func (l4policy L4DirectionPolicy) toMapState(logger *slog.Logger, p *EndpointPol
 type PerSelectorPolicyTuple struct {
 	Policy   *PerSelectorPolicy
 	Selector CachedSelector
-	idset    string
+	idset    CachedIdentitiesSelector
 }
 
 // RedirectFilters returns an iterator for each L4Filter with a redirect in the policy.
@@ -537,7 +537,7 @@ func (l4policy L4DirectionPolicy) forEachRedirectFilter(yield func(*L4Filter, Pe
 		} else {
 			for cs, ps := range l4.PerSelectorPolicies {
 				if ps != nil && ps.IsRedirect() {
-					ok = yield(l4, PerSelectorPolicyTuple{ps, cs, ""})
+					ok = yield(l4, PerSelectorPolicyTuple{ps, cs, nil})
 				}
 			}
 		}

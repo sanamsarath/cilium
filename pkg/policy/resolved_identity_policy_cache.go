@@ -9,7 +9,6 @@ import (
 	"log/slog"
 
 	"github.com/cilium/cilium/pkg/container/set"
-	"github.com/cilium/cilium/pkg/identity"
 	identityPkg "github.com/cilium/cilium/pkg/identity"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
@@ -159,7 +158,7 @@ func (cache *resolvedIdentityPolicyCache) updateSelectorPolicy(identity *identit
 	return selPolicy, true, nil
 }
 
-func (ips *IdentityPolicyState) resolvePolicyLocked(securityIdentity *identity.Identity, rev uint64, repo *Repository) (*selectorPolicy, error) {
+func (ips *IdentityPolicyState) resolvePolicyLocked(securityIdentity *identityPkg.Identity, rev uint64, repo *Repository) (*selectorPolicy, error) {
 	calculatedPolicy := &selectorPolicy{
 		Revision:      rev,
 		SelectorCache: repo.GetSelectorCache(), // passing this to satisfy selctorPolicy attach and detach called by callers(like Endpoints)
