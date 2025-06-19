@@ -232,6 +232,14 @@ func (rules MatchingResolvedPolicies) resolveL4IngressPolicy(policyCtx PolicyCon
 	for _, rp := range rules {
 		if len(rp.IngressRules) > 0 || len(rp.IngressDenyRules) > 0 {
 			ingress = true
+			// TODO: Currently we don't support DefaultDeny option in crp,
+			// so default mode is to always deny traffic not matching
+			// ingress policies. We can add a check here later to handle
+			// DefaultDeny mode in crp -- Verify repository.go
+			// computePolicyEnforcementAndRules func for more details.
+			if !policyCtx.DefaultDenyIngress() {
+				policyCtx.SetDefaultDenyIngress(true)
+			}
 		}
 		// check if the resolved policy is nil or has no ingress rules to resolve
 		if rp != nil && len(rp.IngressRules) > 0 || len(rp.IngressDenyRules) > 0 {
@@ -257,6 +265,15 @@ func (rules MatchingResolvedPolicies) resolveL4EgressPolicy(policyCtx PolicyCont
 	for _, rp := range rules {
 		if len(rp.EgressRules) > 0 || len(rp.EgressDenyRules) > 0 {
 			egress = true
+
+			// TODO: Currently we don't support DefaultDeny option in crp,
+			// so default mode is to always deny traffic not matching
+			// egress policies. We can add a check here later to handle
+			// DefaultDeny mode in crp -- Verify repository.go
+			// computePolicyEnforcementAndRules func for more details.
+			if !policyCtx.DefaultDenyEgress() {
+				policyCtx.SetDefaultDenyEgress(true)
+			}
 		}
 		// check if the CRPRuleSet is nil or has no egress rules to resolve
 		if rp != nil && len(rp.EgressRules) > 0 || len(rp.EgressDenyRules) > 0 {

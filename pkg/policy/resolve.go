@@ -57,8 +57,14 @@ type PolicyContext interface {
 	// DefaultDenyIngress returns true if default deny is enabled for ingress
 	DefaultDenyIngress() bool
 
+	// SetDefaultDenyIngress sets the default deny for ingress
+	SetDefaultDenyIngress(deny bool)
+
 	// DefaultDenyEgress returns true if default deny is enabled for egress
 	DefaultDenyEgress() bool
+
+	// SetDefaultDenyEgress sets the default deny for egress
+	SetDefaultDenyEgress(deny bool)
 
 	GetLogger() *slog.Logger
 

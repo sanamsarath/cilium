@@ -229,8 +229,16 @@ func (p *testPolicyContextType) DefaultDenyIngress() bool {
 	return p.defaultDenyIngress
 }
 
+func (p *testPolicyContextType) SetDefaultDenyIngress(defaultDeny bool) {
+	p.defaultDenyIngress = defaultDeny
+}
+
 func (p *testPolicyContextType) DefaultDenyEgress() bool {
 	return p.defaultDenyEgress
+}
+
+func (p *testPolicyContextType) SetDefaultDenyEgress(defaultDeny bool) {
+	p.defaultDenyEgress = defaultDeny
 }
 
 func (p *testPolicyContextType) GetLogger() *slog.Logger {
