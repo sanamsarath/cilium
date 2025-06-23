@@ -310,6 +310,7 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 				case resource.Delete:
 					p.onDeleteCRP(crp, event.Key, k8sAPIGroupCiliumResolvedPolicyV2Alpha1, crpDone)
 				}
+				reportCRPChangeMetrics(err)
 				if err != nil {
 					p.log.Error("Error processing CRP event",
 						logfields.K8sAPIVersion, event.Object.TypeMeta.APIVersion,

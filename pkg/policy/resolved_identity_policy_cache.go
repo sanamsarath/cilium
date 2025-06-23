@@ -60,10 +60,10 @@ func (cache *resolvedIdentityPolicyCache) DeleteResolvedPolicy(rp *ResolvedPolic
 	affectedIdentities := &set.Set[identityPkg.NumericIdentity]{}
 	for id := range rp.AppliesTo {
 		// lookup IdentityPolicyState for the identity
-		ips := cache.lookupOrCreateIdentityPolicyState(id)
+		ips := cache.lookupIdentityPolicyState(id)
 		if ips == nil {
-			cache.logger.Info("Failed to lookup IdentityPolicyState for ResolvedPolicy",
-				"sourcePolicyUID", rp.SourcePolicyUID, "subjectID", id)
+			cache.logger.Debug("IdentityPolicyState for ResolvedPolicy",
+				"sourcePolicyUID", rp.SourcePolicyUID, "subjectID", id, "notFound", true)
 			continue
 		}
 		ips.deleteResolvedPolicy(rp.SourcePolicyUID)
@@ -88,16 +88,11 @@ func (cache *resolvedIdentityPolicyCache) lookupOrCreateIdentityPolicyState(id i
 	return ips
 }
 
-// delete removes the IdentityPolicyState for the specified identity.
-func (cache *resolvedIdentityPolicyCache) delete(identity *identityPkg.Identity) bool {
+// lookupIdentityPolicyState returns the IdentityPolicyState for the specified identity,
+func (cache *resolvedIdentityPolicyCache) lookupIdentityPolicyState(id identityPkg.NumericIdentity) *IdentityPolicyState {
 	cache.Lock()
 	defer cache.Unlock()
-	ips, ok := cache.policies[identity.ID]
-	if ok {
-		delete(cache.policies, identity.ID)
-		ips.ComputedPolicy = nil // Clear the cached policy
-	}
-	return ok
+	return cache.policies[id]
 }
 
 // getPolicy returns the cached selectorPolicy from the IdentityPolicyState

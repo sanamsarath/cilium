@@ -479,7 +479,26 @@ func (i *policyImporter) processCRPUpdates(ctx context.Context, updates []*polic
 			update.DoneChan <- endRevision
 		}
 
-		// TODO: Send monitor notification for resolved policy update
+		// Send monitor notification for resolved policy update
+		if i.monitorAgent != nil {
+			var msg monitorapi.AgentNotifyMessage
+
+			// Create a resource label to identify this CRP
+			lbls := []string{
+				"cilium.io/resource=crp/" + update.ResolvedPolicy.SourcePolicyUID,
+			}
+
+			if update.Operation == policy.ResolvedIdentityPolicyUpsert {
+				msg = monitorapi.PolicyUpdateMessage(1, lbls, endRevision)
+			} else {
+				msg = monitorapi.PolicyDeleteMessage(1, lbls, endRevision)
+			}
+
+			err := i.monitorAgent.SendEvent(monitorapi.MessageTypeAgent, msg)
+			if err != nil {
+				i.log.Error("Failed to send resolved policy update as monitor notification", logfields.Error, err)
+			}
+		}
 	}
 
 	// All resolved policy updates have been applied; regenerate all affected endpoints
@@ -487,6 +506,15 @@ func (i *policyImporter) processCRPUpdates(ctx context.Context, updates []*polic
 		logfields.PolicyRevision, endRevision)
 	if i.epm != nil {
 		i.epm.UpdatePolicy(idsToRegen, startRevision, endRevision)
+	}
+
+	// Now that the update has rolled out, record ingestion time for CRP updates.
+	for _, update := range updates {
+		if update.ProcessingStartTime.IsZero() {
+			continue
+		}
+		// Use "resolved-policy" as the source label for CRP metrics to distinguish from traditional policies
+		metrics.PolicyImplementationDelay.WithLabelValues("resolved-policy").Observe(time.Since(update.ProcessingStartTime).Seconds())
 	}
 	return nil
 }

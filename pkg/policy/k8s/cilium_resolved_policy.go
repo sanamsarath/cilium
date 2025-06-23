@@ -4,6 +4,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -20,17 +21,6 @@ func (p *policyWatcher) onUpsertCRP(
 	defer func() {
 		p.k8sResourceSynced.SetEventTimestamp(apiGroup)
 	}()
-
-	// If CRP status is not Synced, we do not process it.
-	// if crp.Status.SyncState != v2alpha1.SyncStateSynced {
-	// 	p.log.Debug(
-	// 		"CRPUpsert: Skipping CiliumResolvedPolicy update as status is not Synced",
-	// 		logfields.K8sAPIVersion, crp.TypeMeta.APIVersion,
-	// 		logfields.Name, crp.ObjectMeta.Name,
-	// 		logfields.Status, crp.Status,
-	// 	)
-	// 	return nil
-	// }
 
 	// Check if the CiliumResolvedPolicy has changed.
 	oldCRP, ok := p.crpCache[key]
@@ -133,4 +123,14 @@ func (p *policyWatcher) onDeleteCRP(
 
 	// Remove the CiliumResolvedPolicy from the cache.
 	delete(p.crpCache, key)
+}
+
+// reportCRPChangeMetrics generates metrics for changes (Add, Update, Delete) to
+// Cilium Resolved Policies depending on the operation's success.
+func reportCRPChangeMetrics(err error) {
+	if err != nil {
+		metrics.PolicyChangeTotal.WithLabelValues(metrics.LabelValueOutcomeFail).Inc()
+	} else {
+		metrics.PolicyChangeTotal.WithLabelValues(metrics.LabelValueOutcomeSuccess).Inc()
+	}
 }
