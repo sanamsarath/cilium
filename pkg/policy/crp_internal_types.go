@@ -83,6 +83,10 @@ type IdentityPolicyState struct {
 
 	// egressEnabled
 	EgressPolicyEnabled bool
+
+	// RecomputePolicy - if any new CRP is added or existing CRP is modified,
+	// this flag is set to true, and the policy will be recomputed
+	RecomputePolicy bool
 }
 
 // Helper function to create a ResolvedPolicy from a CiliumResolvedPolicySpec.
@@ -230,7 +234,7 @@ func (rules MatchingResolvedPolicies) resolveL4IngressPolicy(policyCtx PolicyCon
 	state := traceState{}
 
 	for _, rp := range rules {
-		if len(rp.IngressRules) > 0 || len(rp.IngressDenyRules) > 0 {
+		if (len(rp.IngressRules) > 0 || len(rp.IngressDenyRules) > 0) && !ingress {
 			ingress = true
 			// TODO: Currently we don't support DefaultDeny option in crp,
 			// so default mode is to always deny traffic not matching
@@ -257,13 +261,14 @@ func (rules MatchingResolvedPolicies) resolveL4IngressPolicy(policyCtx PolicyCon
 
 func (rules MatchingResolvedPolicies) resolveL4EgressPolicy(policyCtx PolicyContext) (egressPolicyMap L4PolicyMap, egress bool, err error) {
 	result := NewL4PolicyMap()
+	egress = false // default to no egress policy
 
 	policyCtx.PolicyTrace("resolving egress policy")
 
 	state := traceState{}
 
 	for _, rp := range rules {
-		if len(rp.EgressRules) > 0 || len(rp.EgressDenyRules) > 0 {
+		if (len(rp.EgressRules) > 0 || len(rp.EgressDenyRules) > 0) && !egress {
 			egress = true
 
 			// TODO: Currently we don't support DefaultDeny option in crp,

@@ -112,6 +112,7 @@ func (ips *IdentityPolicyState) upsertResolvedPolicy(rp *ResolvedPolicy) {
 	ips.Lock()
 	defer ips.Unlock()
 	ips.MatchingCRPUIDset[rp.SourcePolicyUID] = rp
+	ips.RecomputePolicy = true // Mark that the policy needs to be recomputed
 }
 
 // deleteResolvedPolicy removes a ResolvedPolicy from the IdentityPolicyState for the specified identity.
@@ -120,6 +121,7 @@ func (ips *IdentityPolicyState) deleteResolvedPolicy(sourceUID string) {
 	ips.Lock()
 	defer ips.Unlock()
 	delete(ips.MatchingCRPUIDset, sourceUID)
+	ips.RecomputePolicy = true // Mark that the policy needs to be recomputed
 }
 
 // updateSelectorPolicy resolves the policy for the security identity of the
@@ -143,6 +145,15 @@ func (cache *resolvedIdentityPolicyCache) updateSelectorPolicy(identity *identit
 		return selPolicy, false, nil
 	}
 
+	// Don't resolve policy if the policy is not marked for recompute. Just update
+	// the revision in the selectorPolicy and return it. This will avoid unnecessary
+	// recomputations of the policy during the periodic endpoint regeneration.
+	if selPolicy := ips.getPolicy(); selPolicy != nil && !ips.RecomputePolicy {
+		// Update the revision in the existing policy
+		selPolicy.Revision = rev
+		return selPolicy, false, nil
+	}
+
 	// Resolve the policies, which could fail
 	selPolicy, err := ips.resolvePolicyLocked(identity, rev, cache.repo)
 	if err != nil {
@@ -154,6 +165,9 @@ func (cache *resolvedIdentityPolicyCache) updateSelectorPolicy(identity *identit
 
 	// set revision in the selectorPolicy
 	selPolicy.Revision = rev
+
+	// Reset the recompute flag after successful policy resolution
+	ips.RecomputePolicy = false
 
 	return selPolicy, true, nil
 }
