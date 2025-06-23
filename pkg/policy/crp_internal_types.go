@@ -96,26 +96,26 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 		return nil, fmt.Errorf("CiliumResolvedPolicySpec is nil")
 	}
 
-	// Convert slice of appliesTo identities to map for efficient lookup
-	appliesToIdentitiesMap := make(map[identity.NumericIdentity]struct{})
-	for _, id := range spec.AppliesTo.Identities {
-		appliesToIdentitiesMap[id] = struct{}{}
-	}
-
 	sourceUID := RuleKey
 	if sourceUID == "" {
 		return nil, fmt.Errorf("sourcePolicyUID is empty, cannot create ResolvedPolicy")
 	}
 
+	// Pre-allocate with capacity to reduce allocations
+	appliesToIdentitiesMap := make(map[identity.NumericIdentity]struct{}, len(spec.AppliesTo.Identities))
+	for _, id := range spec.AppliesTo.Identities {
+		appliesToIdentitiesMap[id] = struct{}{}
+	}
+
 	// Helper function to convert v2alpha1 peer rules to internal representation
 	convertIngressRule := func(rules []v2alpha1.ResolvedIngressRule) []CRPPeerRule {
-		if rules == nil {
+		if len(rules) == 0 {
 			return nil
 		}
 		ingressRules := make([]CRPPeerRule, len(rules))
 		for i, rule := range rules {
-			// Convert slice of peer identities to map for efficient lookup
-			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{})
+			// Pre-allocate with exact capacity
+			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{}, len(rule.FromIdentities))
 			for _, id := range rule.FromIdentities {
 				matchingIdentitiesMap[id] = struct{}{}
 			}
@@ -129,16 +129,14 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 		return ingressRules
 	}
 
-	// TODO: This is redundant, talks with team to fix crp struct to use v2alpha1.ResolvedIngressRule
-	// type for both ingress and ingress deny rules if the structure is the same.
 	convertIngressDenyRule := func(rules []v2alpha1.ResolvedIngressDenyRule) []CRPPeerRule {
-		if rules == nil {
+		if len(rules) == 0 {
 			return nil
 		}
 		ingressDenyRules := make([]CRPPeerRule, len(rules))
 		for i, rule := range rules {
-			// Convert slice of peer identities to map for efficient lookup
-			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{})
+			// Pre-allocate with exact capacity
+			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{}, len(rule.FromIdentities))
 			for _, id := range rule.FromIdentities {
 				matchingIdentitiesMap[id] = struct{}{}
 			}
@@ -153,13 +151,13 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 	}
 
 	convertEgressRule := func(rules []v2alpha1.ResolvedEgressRule) []CRPPeerRule {
-		if rules == nil {
+		if len(rules) == 0 {
 			return nil
 		}
 		egressRules := make([]CRPPeerRule, len(rules))
 		for i, rule := range rules {
-			// Convert slice of peer identities to map for efficient lookup
-			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{})
+			// Pre-allocate with exact capacity
+			matchingIdentitiesMap := make(map[identity.NumericIdentity]struct{}, len(rule.ToIdentities))
 			for _, id := range rule.ToIdentities {
 				matchingIdentitiesMap[id] = struct{}{}
 			}
@@ -173,7 +171,7 @@ func ConvertToResolvedPolicy(spec *v2alpha1.CiliumResolvedPolicySpec, RuleKey st
 		return egressRules
 	}
 
-	// Create and return the internal CRPRuleSet representation
+	// Create and return the internal ResolvedPolicy representation
 	return &ResolvedPolicy{
 		SourcePolicyUID:  sourceUID,
 		IngressRules:     convertIngressRule(spec.ResolvedIngressRules),

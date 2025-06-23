@@ -1,8 +1,8 @@
 package k8s
 
 import (
+	cilium_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
-	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/policy"
@@ -11,7 +11,7 @@ import (
 
 // onCRPUpsert handles CiliumResolvedPolicy update events.
 func (p *policyWatcher) onUpsertCRP(
-	crp *types.SlimCRP,
+	crp *cilium_v2alpha1.CiliumResolvedPolicy,
 	key resource.Key,
 	apiGroup string,
 	dc chan uint64,
@@ -73,7 +73,7 @@ func (p *policyWatcher) onUpsertCRP(
 
 // onCRPDelete handles CiliumResolvedPolicy delete events.
 func (p *policyWatcher) onDeleteCRP(
-	crp *types.SlimCRP,
+	crp *cilium_v2alpha1.CiliumResolvedPolicy,
 	key resource.Key,
 	apiGroup string,
 	dc chan uint64,

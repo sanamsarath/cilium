@@ -60,7 +60,7 @@ type policyWatcher struct {
 	cnpCache map[resource.Key]*types.SlimCNP
 
 	// crpCache contains the CiliumResolvedPolicy resources.
-	crpCache map[resource.Key]*types.SlimCRP
+	crpCache map[resource.Key]*cilium_v2alpha1.CiliumResolvedPolicy
 
 	cidrGroupCache map[string]*cilium_v2.CiliumCIDRGroup
 
@@ -294,15 +294,8 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 					continue
 				}
 
-				crp := &types.SlimCRP{
-					CiliumResolvedPolicy: &cilium_v2alpha1.CiliumResolvedPolicy{
-						TypeMeta:   event.Object.TypeMeta,
-						ObjectMeta: event.Object.ObjectMeta,
-						Spec:       event.Object.Spec,
-						Specs:      event.Object.Specs,
-						Status:     event.Object.Status,
-					},
-				}
+				// Use the CRP directly to avoid unnecessary wrapper and deep copies
+				crp := event.Object
 				var err error
 				switch event.Kind {
 				case resource.Upsert:

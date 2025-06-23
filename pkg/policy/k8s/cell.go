@@ -116,7 +116,7 @@ func startK8sPolicyWatcher(params PolicyWatcherParams) {
 		cnpCache:       make(map[resource.Key]*types.SlimCNP),
 		cidrGroupCache: make(map[string]*cilium_v2.CiliumCIDRGroup),
 		cidrGroupCIDRs: make(map[string]sets.Set[netip.Prefix]),
-		crpCache:       make(map[resource.Key]*types.SlimCRP),
+		crpCache:       make(map[resource.Key]*cilium_v2alpha1.CiliumResolvedPolicy),
 
 		toServicesPolicies: make(map[resource.Key]struct{}),
 		cnpByServiceID:     make(map[k8s.ServiceID]map[resource.Key]struct{}),
