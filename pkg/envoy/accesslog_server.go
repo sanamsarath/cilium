@@ -33,6 +33,7 @@ type AccessLogServer struct {
 	localEndpointStore *LocalEndpointStore
 	stopCh             chan struct{}
 	bufferSize         uint
+	messageCount       uint64 // Track total messages processed
 }
 
 func newAccessLogServer(logger *slog.Logger, accessLogger accesslog.ProxyAccessLogger, envoySocketDir string, proxyGID uint, localEndpointStore *LocalEndpointStore, bufferSize uint) *AccessLogServer {
@@ -191,6 +192,26 @@ func (s *AccessLogServer) handleConn(ctx context.Context, conn *net.UnixConn) {
 }
 
 func (s *AccessLogServer) logRecord(ctx context.Context, pblog *cilium.LogEntry) *accesslog.LogRecord {
+	// Increment message counter
+	s.messageCount++
+
+	// Monitor access log messages for CRP analysis
+	s.logger.Info("AccessLog: Processing message",
+		"message_count", s.messageCount,
+		"policy_name", pblog.PolicyName,
+		"source_identity", pblog.SourceSecurityId,
+		"dest_identity", pblog.DestinationSecurityId,
+		"is_ingress", pblog.IsIngress,
+		"proxy_id", pblog.ProxyId,
+		"has_http", pblog.GetHttp() != nil,
+		"has_kafka", pblog.GetKafka() != nil,
+		"has_l7", pblog.GetGenericL7() != nil,
+		"source_addr", pblog.SourceAddress,
+		"dest_addr", pblog.DestinationAddress,
+		"timestamp", pblog.Timestamp,
+		"status", "SUCCESS",
+	)
+
 	var kafkaRecord *accesslog.LogRecordKafka
 	var kafkaTopics []string
 
