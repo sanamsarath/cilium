@@ -87,7 +87,9 @@ func agentCRDResourceNames() []string {
 	}
 
 	if option.Config.EnableCentralizedNetworkPolicy {
-		result = append(result, CRDResourceName(v2alpha1.CRPName))
+		// TODO: Uncomment this if cilium-policy-controller is merged into operator.
+		// For now CiliumResolvedPolicy will be registered by the policy controller.
+		// result = append(result, CRDResourceName(v2alpha1.CRPName))
 	}
 
 	result = append(result,

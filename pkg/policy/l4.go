@@ -1404,7 +1404,7 @@ func createL4FilterFromIdentities(policyCtx PolicyContext, peerEndpoints map[ide
 		PortName:            portName,             // non-"" for named ports
 		Protocol:            protocol,
 		U8Proto:             u8p,
-		PerSelectorPolicies: make(L7DataMap),
+		PerSelectorPolicies: nil,
 		RuleOrigin:          make(map[CachedSelector]ruleOrigin),
 		PerIdentityPolicies: make(L7IdentityDataMap),
 		Ingress:             ingress,
@@ -1413,10 +1413,10 @@ func createL4FilterFromIdentities(policyCtx PolicyContext, peerEndpoints map[ide
 	// If peerEndpoints has "0", it means that the policy applies to all endpoints(wildcard).
 	// peerEndpoints list with wild card identity is expected to have only one entry with identity 0.
 	// If there are other identities in the map, we can ignore them as wildcard supersets them.
-	if _, ok := peerEndpoints[identityPkg.InvalidIdentity]; ok {
+	if _, ok := peerEndpoints[identityPkg.NumericIdentity(0)]; ok {
 		// wildcard identity applies to all
 		l4.wildcardId = true
-		wildcardKey := NewIdentitySelector(identityPkg.NumericIdentitySlice{identityPkg.InvalidIdentity})
+		wildcardKey := NewIdentitySelector(identityPkg.NumericIdentitySlice{identityPkg.NumericIdentity(0)})
 		l4.PerIdentityPolicies[wildcardKey] = nil // no per-identity policy (yet)
 	} else {
 		// collect numeric identities into a slice
@@ -1549,8 +1549,9 @@ func (l4 *L4Filter) removeSelectors(selectorCache *SelectorCache) {
 // L4Filter may still be accessed concurrently after it has been detached.
 func (l4 *L4Filter) detach(selectorCache *SelectorCache) {
 	if option.Config.EnableCentralizedNetworkPolicy {
-		l4.removeSelectors(selectorCache)
+		return
 	}
+	l4.removeSelectors(selectorCache)
 	l4.policy.Store(nil)
 }
 
@@ -1558,7 +1559,11 @@ func (l4 *L4Filter) detach(selectorCache *SelectorCache) {
 // from SelectorCache. L4Filter (and L4Policy) is read-only after this is called,
 // multiple goroutines will be reading the fields from that point on.
 func (l4 *L4Filter) attach(ctx PolicyContext, l4Policy *L4Policy) policyFeatures {
-	l4.policy.Store(l4Policy)
+	// In centralized network policy mode, the L4Policy does not need to be
+	// stored in the L4Filter
+	if !option.Config.EnableCentralizedNetworkPolicy {
+		l4.policy.Store(l4Policy)
+	}
 	return l4.getFeatures(ctx, l4Policy)
 }
 
