@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
-
 #include <bpf/ctx/skb.h>
 #include <bpf/api.h>
+#include "common.h"
 #include "pktgen.h"
 
 #define ENABLE_SCTP
@@ -1126,13 +1125,13 @@ static long snat_callback_tcp(__u32 i, struct snat_callback_ctx *ctx)
 	return ctx->err != 0;
 }
 
-CHECK("tc", "nat4_port_allocation")
+CHECK("tc", "nat4_port_allocation_tcp")
 int test_nat4_port_allocation_tcp_check(struct __ctx_buff *ctx)
 {
 	struct snat_callback_ctx cb_ctx = {
 		.ctx = ctx,
 	};
-	__u32 iters;
+	long iters;
 
 	test_init();
 	/* This test checks the effectiveness of port allocation algorithm in SNAT.
@@ -1257,13 +1256,13 @@ static long snat_callback_udp(__u32 i, struct snat_callback_ctx *ctx)
 	return ctx->err != 0;
 }
 
-CHECK("tc", "nat4_port_allocation")
+CHECK("tc", "nat4_port_allocation_udp")
 int test_nat4_port_allocation_udp_check(struct __ctx_buff *ctx)
 {
 	struct snat_callback_ctx cb_ctx = {
 		.ctx = ctx,
 	};
-	__u32 iters;
+	long iters;
 
 	test_init();
 	/* This test checks the effectiveness of port allocation algorithm in SNAT.

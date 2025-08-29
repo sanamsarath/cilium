@@ -12,14 +12,12 @@
 #include "lib/drop.h"
 #include "lib/eps.h"
 #include "lib/ipv4.h"
-#include "lib/vxlan.h"
 #include "lib/node.h"
 #include "lib/identity.h"
 
 /* We cap key index at 4 bits because mark value is used to map ctx to key */
 #define MAX_KEY_INDEX 15
 
-#ifdef ENABLE_IPSEC
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32);
@@ -27,7 +25,6 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(max_entries, 1);
 } cilium_encrypt_state __section_maps_btf;
-#endif
 
 static __always_inline __u8 get_min_encrypt_key(__u8 peer_key __maybe_unused)
 {
@@ -82,8 +79,9 @@ set_ipsec_decrypt_mark(struct __ctx_buff *ctx, __u16 node_id)
 }
 
 static __always_inline int
-set_ipsec_encrypt(struct __ctx_buff *ctx, __u8 spi, __u32 tunnel_endpoint,
-		  __u32 seclabel, bool use_meta, bool use_spi_from_map)
+set_ipsec_encrypt(struct __ctx_buff *ctx, __u8 spi,
+		  struct remote_endpoint_info *info, __u32 seclabel,
+		  bool use_meta, bool use_spi_from_map)
 {
 	/* IPSec is performed by the stack on any packets with the
 	 * MARK_MAGIC_ENCRYPT bit set. During the process though we
@@ -96,7 +94,7 @@ set_ipsec_encrypt(struct __ctx_buff *ctx, __u8 spi, __u32 tunnel_endpoint,
 	struct node_value *node_value = NULL;
 	__u32 mark;
 
-	node_value = lookup_ip4_node(tunnel_endpoint);
+	node_value = lookup_node(info);
 	if (!node_value || !node_value->id)
 		return DROP_NO_NODE_ID;
 
@@ -214,12 +212,12 @@ static __always_inline int
 ipsec_maybe_redirect_to_encrypt(struct __ctx_buff *ctx, __be16 proto,
 				__u32 src_sec_identity)
 {
+	struct remote_endpoint_info __maybe_unused fake_info = {0};
 	struct remote_endpoint_info __maybe_unused *dst = NULL;
 	struct remote_endpoint_info __maybe_unused *src = NULL;
 	void *data __maybe_unused, *data_end __maybe_unused;
 	struct iphdr __maybe_unused *ip4;
 	struct ipv6hdr __maybe_unused *ip6;
-	__u32 magic __maybe_unused = 0;
 	int ip_proto = 0;
 	int ret = 0;
 	union macaddr dst_mac = CILIUM_NET_MAC;
@@ -262,13 +260,11 @@ ipsec_maybe_redirect_to_encrypt(struct __ctx_buff *ctx, __be16 proto,
 			/* NOTE: we confirm double-encryption will not occur
 			 * above in the `ctx_is_overlay_encrypted` check
 			 */
+			fake_info.tunnel_endpoint.ip4 = ip4->daddr;
+			fake_info.flag_has_tunnel_ep = true;
 
-			/* see comment in the native-routing mode call. */
-			ret = set_ipsec_encrypt(ctx, 0, ip4->daddr,
-						get_identity(ctx), true,
-						true);
-			if (ret != CTX_ACT_OK)
-				return ret;
+			dst = &fake_info;
+			src_sec_identity = get_identity(ctx);
 			goto overlay_encrypt;
 		}
 #  endif /* TUNNEL_MODE */
@@ -289,10 +285,27 @@ ipsec_maybe_redirect_to_encrypt(struct __ctx_buff *ctx, __be16 proto,
 
 # ifdef ENABLE_IPV6
 	case bpf_htons(ETH_P_IPV6):
-#ifndef TUNNEL_MODE
 		/* handle native routing ipv6 */
 		if (!revalidate_data(ctx, &data, &data_end, &ip6))
 			return DROP_INVALID;
+
+#  if defined(TUNNEL_MODE)
+		/* See comment in IPv4 case.
+		 */
+		if (ctx_is_overlay(ctx)) {
+			/* NOTE: we confirm double-encryption will not occur
+			 * above in the `ctx_is_overlay_encrypted` check
+			 */
+			ipv6_addr_copy_unaligned(&fake_info.tunnel_endpoint.ip6,
+						 (union v6addr *)&ip6->daddr);
+			fake_info.flag_has_tunnel_ep = true;
+			fake_info.flag_ipv6_tunnel_ep = true;
+
+			dst = &fake_info;
+			src_sec_identity = get_identity(ctx);
+			goto overlay_encrypt;
+		}
+#  endif /* TUNNEL_MODE */
 
 		ip_proto = ip6->nexthdr;
 
@@ -306,22 +319,21 @@ ipsec_maybe_redirect_to_encrypt(struct __ctx_buff *ctx, __be16 proto,
 			src_sec_identity = src->sec_identity;
 		}
 		break;
-#endif /* TUNNEL_MODE */
 # endif /* ENABLE_IPv6 */
 	default:
 		return CTX_ACT_OK;
 	}
 
-	if (!dst)
-		return CTX_ACT_OK;
-
-	if (!dst->tunnel_endpoint.ip4)
+	if (!dst || !dst->flag_has_tunnel_ep)
 		return CTX_ACT_OK;
 
 	if (!ipsec_redirect_sec_id_ok(src_sec_identity, dst->sec_identity,
 				      ip_proto))
 		return CTX_ACT_OK;
 
+#  if defined(TUNNEL_MODE)
+overlay_encrypt:
+#  endif
 	/* mark packet for encryption
 	 * for now, we flip the 'use_meta' flag true, this is required since
 	 * rhel 8.6 kernels lack a patch which preserves marks through eBPF
@@ -331,14 +343,10 @@ ipsec_maybe_redirect_to_encrypt(struct __ctx_buff *ctx, __be16 proto,
 	 * supports rhel 8.6 'use_meta' can be flipped back to false and we
 	 * can rely only on the mark.
 	 */
-	ret = set_ipsec_encrypt(ctx, 0, dst->tunnel_endpoint.ip4,
-				src_sec_identity, true, true);
+	ret = set_ipsec_encrypt(ctx, 0, dst, src_sec_identity, true, true);
 	if (ret != CTX_ACT_OK)
 		return ret;
 
-#  if defined(TUNNEL_MODE) && defined(ENABLE_IPV4)
-overlay_encrypt:
-#  endif
 	/* redirect to the ingress side of CILIUM_NET.
 	 * this will subject the packet to the ingress XFRM hooks,
 	 * encrypting the packet.
@@ -354,87 +362,6 @@ overlay_encrypt:
 		return DROP_INVALID;
 	return ret;
 }
-
-#if defined(ENABLE_ENCRYPTED_OVERLAY)
-/* Sets the encryption mark on an overlay (VXLAN) packet and redirects the
- * packet to the ingress side of it's associated ifindex.
- *
- * The recirculated overlay packet will then be subjected to XFRM hooks in the
- * output routing path, since the original src/dst of the overlay packet routes
- * off-host.
- *
- * This function is useful when you want to encrypt overlay traffic and use the
- * underlay to deliver encrypted overlay traffic to the remote node.
- * For this to work the IPSec control plane must install XFRM policies and
- * states which set the tunnel source and destination to the underlay address of
- * the destination node.
- *
- * If the redirect to the ingress side of ctx->ingress is successful
- * CTX_ACT_REDIRECT is returned, otherwise an error code is returned.
- *
- * Be aware that the redirected-to interface needs to have the following
- * sysctl enabled for this to work correctly (per-device is fine)
- *   - net.ipv4.conf.default.rp_filter = 0
- *   - net.ipv4.conf.default.accept_local = 1
- */
-static __always_inline int
-encrypt_overlay_and_redirect(struct __ctx_buff *ctx)
-{
-	struct iphdr *ip4, *inner_ipv4 = NULL;
-	struct endpoint_info *ep_info = NULL;
-	void *data, *data_end;
-	__u8 dst_mac = 0;
-	__u32 l4_off;
-	int ret = 0;
-
-	if (!revalidate_data(ctx, &data, &data_end, &ip4))
-		return DROP_INVALID;
-
-	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
-
-	ret = vxlan_get_inner_ipv4(data, data_end, l4_off, &inner_ipv4);
-	if (!ret)
-		return DROP_INVALID;
-
-	ep_info = __lookup_ip4_endpoint(inner_ipv4->saddr);
-	if (!ep_info)
-		return DROP_INVALID;
-
-	/*
-	 * this is a vxlan packet so ip4->daddr is the tunnel endpoint
-	 */
-	ret = set_ipsec_encrypt(ctx, 0, ip4->daddr, ep_info->sec_id, false,
-				true);
-	if (ret != CTX_ACT_OK)
-		return ret;
-
-	/*
-	 * source mac is our current egress interface, lets copy it to dmac
-	 * so redirecting to ingress side of the same interface doesn't fail.
-	 */
-	if (eth_load_saddr(ctx, &dst_mac, 0) != 0)
-		return DROP_INVALID;
-	if (eth_store_daddr(ctx, &dst_mac, 0) != 0)
-		return DROP_WRITE_ERROR;
-
-	data = ctx_data(ctx);
-	data_end = ctx_data_end(ctx);
-
-	/* right now, the VNI of this packet is ENCRYPTED_OVERLAY_ID, we need
-	 * to rewrite this VNI to the source's sec id before we transmit it
-	 */
-	if (!vxlan_rewrite_vni(ctx, data, data_end, l4_off, ep_info->sec_id))
-		return DROP_INVALID;
-
-	/* redirect to ingress side of ifindex so the packet has xfrm applied */
-	ret = ctx_redirect(ctx, ctx->ifindex, BPF_F_INGRESS);
-	if (ret != CTX_ACT_REDIRECT)
-		return DROP_INVALID;
-
-	return ret;
-}
-#endif /* ENABLE_ENCRYPTED_OVERLAY */
-
 #else
 static __always_inline int
 do_decrypt(struct __ctx_buff __maybe_unused *ctx, __u16 __maybe_unused proto)

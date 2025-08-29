@@ -37,7 +37,6 @@ import (
 	"github.com/cilium/cilium/cilium-cli/k8s"
 	"github.com/cilium/cilium/cilium-cli/utils/features"
 	ciliumdef "github.com/cilium/cilium/pkg/defaults"
-	"github.com/cilium/cilium/pkg/versioncheck"
 )
 
 const sysdumpLogFile = "cilium-sysdump.log"
@@ -404,7 +403,7 @@ func (c *Collector) teardownLogging() {
 
 // replaceTimestamp can be used to replace the special timestamp placeholder in file and directory names.
 func (c *Collector) replaceTimestamp(f string) string {
-	return strings.Replace(f, timestampPlaceholderFileName, c.startTime.Format(timeFormat), -1)
+	return strings.ReplaceAll(f, timestampPlaceholderFileName, c.startTime.Format(timeFormat))
 }
 
 // AbsoluteTempPath returns the absolute path where to store the specified filename temporarily.
@@ -823,20 +822,6 @@ func (c *Collector) Run() error {
 				}
 				if err := c.WriteYAML(ingressClassesFileName, v); err != nil {
 					return fmt.Errorf("failed to collect IngressClasses: %w", err)
-				}
-				return nil
-			},
-		},
-		{
-			Description: "Collecting Cilium LoadBalancer IP Pools",
-			Quick:       true,
-			Task: func(ctx context.Context) error {
-				v, err := c.Client.ListCiliumLoadBalancerIPPools(ctx, metav1.ListOptions{})
-				if err != nil {
-					return fmt.Errorf("failed to collect Cilium LoadBalancer IP Pools: %w", err)
-				}
-				if err := c.WriteYAML(ciliumLoadBalancerIPPoolsFileName, v); err != nil {
-					return fmt.Errorf("failed to collect Cilium LoadBalancer IP Pools: %w", err)
 				}
 				return nil
 			},
@@ -1451,6 +1436,7 @@ func (c *Collector) Run() error {
 			},
 		},
 	}
+	ciliumTasks = append(ciliumTasks, collectCiliumV2OrV2Alpha1Resource(c, "ciliumloadbalancerippools", "Cilium LoadBalancer IP Pools"))
 
 	if c.Options.HubbleFlowsCount > 0 {
 		ciliumTasks = append(ciliumTasks, Task{
@@ -2250,7 +2236,7 @@ func (c *Collector) SubmitTetragonBugtoolTasks(pods []*corev1.Pod, tetragonAgent
 			if err != nil {
 				return fmt.Errorf("failed to collect 'tetragon-bugtool' output for %q: %w", p.Name, err)
 			}
-			if err := untar(f, strings.Replace(f, ".tar.gz", "", -1)); err != nil {
+			if err := untar(f, strings.ReplaceAll(f, ".tar.gz", "")); err != nil {
 				c.logWarn("Failed to unarchive 'tetragon-bugtool' output for %q: %v", p.Name, err)
 				return nil
 			}
@@ -2399,14 +2385,7 @@ func (c *Collector) submitCiliumBugtoolTasks(pods []*corev1.Pod) error {
 			}()
 
 			// Default flags for cilium-bugtool
-			bugtoolFlags := []string{"--archiveType=gz"}
-			ciliumVersion, err := c.Client.GetCiliumVersion(ctx, p)
-			if err == nil {
-				// This flag is not available in older versions
-				if versioncheck.MustCompile(">=1.13.0")(*ciliumVersion) {
-					bugtoolFlags = append(bugtoolFlags, "--exclude-object-files")
-				}
-			}
+			bugtoolFlags := []string{"--archiveType=gz", "--exclude-object-files"}
 			// Additional flags
 			bugtoolFlags = append(bugtoolFlags, c.Options.CiliumBugtoolFlags...)
 
@@ -2433,7 +2412,7 @@ func (c *Collector) submitCiliumBugtoolTasks(pods []*corev1.Pod) error {
 				return fmt.Errorf("failed to collect 'cilium-bugtool' output for %q: %w", p.Name, err)
 			}
 			// Untar the resulting file.
-			if err := untar(f, strings.Replace(f, ".tar.gz", "", -1)); err != nil {
+			if err := untar(f, strings.ReplaceAll(f, ".tar.gz", "")); err != nil {
 				c.logWarn("Failed to unarchive 'cilium-bugtool' output for %q: %v", p.Name, err)
 				return nil
 			}

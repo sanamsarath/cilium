@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
-	"go4.org/netipx"
 
 	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/controller"
@@ -26,7 +25,6 @@ import (
 	identityPkg "github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/labels"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/node"
@@ -131,7 +129,7 @@ type policyGenerateResult struct {
 
 // Release resources held for the new policy
 // Must be called with buildMutex held
-func (res *policyGenerateResult) release() {
+func (res *policyGenerateResult) release(logger *slog.Logger) {
 	// Detach the rejected endpoint policy.
 	// This is needed to release resources held for the EndpointPolicy
 	if res != nil && res.endpointPolicy != nil {
@@ -139,7 +137,7 @@ func (res *policyGenerateResult) release() {
 		res.endpointPolicy.Ready()
 		// Detach the EndpointPolicy from the SelectorPolicy it was
 		// instantiated from
-		res.endpointPolicy.Detach(logging.DefaultSlogLogger)
+		res.endpointPolicy.Detach(logger)
 		res.endpointPolicy = nil
 	}
 }
@@ -268,7 +266,7 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 
 	// DistillPolicy converts a SelectorPolicy in to an EndpointPolicy
 	stats.endpointPolicyCalculation.Start()
-	result.endpointPolicy = selectorPolicy.DistillPolicy(logging.DefaultSlogLogger, e, desiredRedirects)
+	result.endpointPolicy = selectorPolicy.DistillPolicy(e.getLogger(), e, desiredRedirects)
 	stats.endpointPolicyCalculation.End(true)
 
 	datapathRegenCtxt.policyResult = result
@@ -305,12 +303,13 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 	if e.identityRevision != res.identityRevision {
 		// Detach the rejected endpoint policy.
 		// This is needed to release resources held for the EndpointPolicy
-		res.release()
+		res.release(e.getLogger())
 
 		e.getLogger().Info("Endpoint SecurityIdentity changed during policy regeneration")
 		return fmt.Errorf("endpoint %d SecurityIdentity changed during policy regeneration", e.ID)
 	}
 
+	oldNextPolicyRevision := e.nextPolicyRevision
 	// Set the revision of this endpoint to the current revision of the policy
 	// repository.
 	e.setNextPolicyRevision(res.policyRevision)
@@ -323,7 +322,7 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 			// Mark as "ready" so that Detach will not complain about it
 			e.desiredPolicy.Ready()
 			// Detach the EndpointPolicy from the SelectorPolicy it was instantiated from
-			e.desiredPolicy.Detach(logging.DefaultSlogLogger)
+			e.desiredPolicy.Detach(e.getLogger())
 		}
 
 		e.desiredPolicy = res.endpointPolicy
@@ -334,7 +333,13 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 		datapathRegenCtxt.revertStack.Push(func() error {
 			// Do nothing if e.policyMap was not initialized already
 			if e.policyMap != nil && e.desiredPolicy != e.realizedPolicy {
-				e.desiredPolicy.Detach(logging.DefaultSlogLogger)
+				// Revert nextPolicyRevision; otherwise,
+				// res.endpointPolicy will not be recalculated
+				// on the next regeneration attempt, and we
+				// won't advance to the true desired policy map
+				// state. See GH-38998.
+				e.setNextPolicyRevision(oldNextPolicyRevision)
+				e.desiredPolicy.Detach(e.getLogger())
 				e.desiredPolicy = e.realizedPolicy
 
 				currentMap, err := e.policyMap.DumpToMapStateMap()
@@ -379,15 +384,12 @@ func (e *Endpoint) regenerate(ctx *regenerationContext) (retErr error) {
 	ctx.Stats = regenerationStatistics{}
 	stats := &ctx.Stats
 	stats.totalTime.Start()
-	debugLogsEnabled := e.getLogger().Enabled(context.Background(), slog.LevelDebug)
 
-	if debugLogsEnabled {
-		e.getLogger().Debug(
-			"Regenerating endpoint",
-			logfields.StartTime, time.Now(),
-			logfields.Reason, ctx.Reason,
-		)
-	}
+	e.getLogger().Debug(
+		"Regenerating endpoint",
+		logfields.StartTime, time.Now(),
+		logfields.Reason, ctx.Reason,
+	)
 
 	defer func() {
 		// This has to be within a func(), not deferred directly, so that the
@@ -551,7 +553,7 @@ func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir st
 
 	if e.desiredPolicy != e.realizedPolicy {
 		// Remove references to the old policy
-		e.realizedPolicy.Detach(logging.DefaultSlogLogger)
+		e.realizedPolicy.Detach(e.getLogger())
 		// Set realized state to desired state.
 		e.realizedPolicy = e.desiredPolicy
 	}
@@ -680,7 +682,7 @@ func (e *Endpoint) UpdatePolicy(idsToRegen *set.Set[identityPkg.NumericIdentity]
 	// bump the policy revision directly (as long as we didn't miss an update somehow).
 	if !idsToRegen.Has(secID) {
 		if e.policyRevision < fromRev {
-			if e.state == StateWaitingToRegenerate {
+			if e.state == StateWaitingToRegenerate || e.state == StateRestoring {
 				// We can log this at less severity since a regeneration was already queued.
 				// This can happen if two policy updates come in quick succession, with the first
 				// affecting this endpoint and the second not.
@@ -833,13 +835,22 @@ func (e *Endpoint) Regenerate(regenMetadata *regeneration.ExternalRegenerationMe
 	return done
 }
 
-// InitialPolicyComputedLocked marks computation of the initial Envoy policy done.
-// Endpoint lock must be held so that the channel is never closed twice.
-func (e *Endpoint) InitialPolicyComputedLocked() {
+// Wait for initial policy blocks till the initial policy for the endpoint is computed
+// or the endpoint is stopped.
+func (e *Endpoint) WaitForInitialPolicy() {
 	select {
-	case <-e.InitialEnvoyPolicyComputed:
+	case <-e.initialEnvoyPolicyComputed:
+	case <-e.aliveCtx.Done():
+	}
+}
+
+// initialPolicyComputedLocked marks computation of the initial Envoy policy done.
+// Endpoint lock must be held so that the channel is never closed twice.
+func (e *Endpoint) initialPolicyComputedLocked() {
+	select {
+	case <-e.initialEnvoyPolicyComputed:
 	default:
-		close(e.InitialEnvoyPolicyComputed)
+		close(e.initialEnvoyPolicyComputed)
 	}
 }
 
@@ -875,7 +886,7 @@ func (e *Endpoint) ComputeInitialPolicy(regenContext *regenerationContext) (erro
 
 	err = e.lockAlive()
 	if err != nil {
-		datapathRegenCtxt.policyResult.release()
+		datapathRegenCtxt.policyResult.release(e.getLogger())
 		return err, func() {}
 	}
 	defer e.unlock()
@@ -886,7 +897,7 @@ func (e *Endpoint) ComputeInitialPolicy(regenContext *regenerationContext) (erro
 	release := func() {
 		e.buildMutex.Lock()
 		defer e.buildMutex.Unlock()
-		datapathRegenCtxt.policyResult.release()
+		datapathRegenCtxt.policyResult.release(e.getLogger())
 	}
 
 	err = e.setDesiredPolicy(datapathRegenCtxt)
@@ -920,7 +931,7 @@ func (e *Endpoint) ComputeInitialPolicy(regenContext *regenerationContext) (erro
 	}
 
 	// Signal computation of the initial Envoy policy if not done yet
-	e.InitialPolicyComputedLocked()
+	e.initialPolicyComputedLocked()
 
 	return nil, release
 }
@@ -942,7 +953,7 @@ func (e *Endpoint) startRegenerationFailureHandler() {
 				e.getLogger().Debug("received signal that regeneration failed")
 			case <-ctx.Done():
 				e.getLogger().Debug("exiting retrying regeneration goroutine due to endpoint being deleted")
-				return nil
+				return controller.NewExitReason("endpoint being deleted")
 			}
 
 			regenMetadata := &regeneration.ExternalRegenerationMetadata{
@@ -952,7 +963,10 @@ func (e *Endpoint) startRegenerationFailureHandler() {
 				// of the failure, simply that something failed.
 				RegenerationLevel: regeneration.RegenerateWithDatapath,
 			}
-			regen, _ := e.SetRegenerateStateIfAlive(regenMetadata)
+			regen, err := e.SetRegenerateStateIfAlive(regenMetadata)
+			if err != nil {
+				return controller.NewExitReason("endpoint being deleted")
+			}
 			if !regen {
 				// We don't need to regenerate because the endpoint is d
 				// disconnecting / is disconnected, or another regeneration has
@@ -994,7 +1008,7 @@ func (e *Endpoint) FormatGlobalEndpointID() string {
 // This synchronizes the key-value store with a mapping of the endpoint's IP
 // with the numerical ID representing its security identity.
 func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
-	if option.Config.KVStore == "" || !endpointIP.IsValid() {
+	if !e.kvstoreSyncher.IsEnabled() || !endpointIP.IsValid() {
 		return
 	}
 
@@ -1024,23 +1038,41 @@ func (e *Endpoint) runIPIdentitySync(endpointIP netip.Addr) {
 					e.runlock()
 					return nil
 				}
+				logger := e.getLogger()
 
 				ID := e.SecurityIdentity.ID
-				hostIP, ok := netipx.FromStdIP(node.GetIPv4())
-				if !ok {
+				hostIP, err := netip.ParseAddr(node.GetCiliumEndpointNodeIP(logger))
+				if err != nil {
 					e.runlock()
-					return controller.NewExitReason("Failed to convert node IPv4 address")
+					return controller.NewExitReason("Failed to get node IP")
 				}
-				key := node.GetEndpointEncryptKeyIndex()
+				key := node.GetEndpointEncryptKeyIndex(logger, e.wgConfig)
 				metadata := e.FormatGlobalEndpointID()
 				k8sNamespace := e.K8sNamespace
 				k8sPodName := e.K8sPodName
+
+				k8sServiceAccount := ""
+				if pod := e.GetPod(); pod != nil {
+					k8sServiceAccount = pod.Spec.ServiceAccountName
+				}
 
 				// Release lock as we do not want to have long-lasting key-value
 				// store operations resulting in lock being held for a long time.
 				e.runlock()
 
-				if err := e.kvstoreSyncher.Upsert(ctx, endpointIP, hostIP, ID, key, metadata, k8sNamespace, k8sPodName, e.GetK8sPorts()); err != nil {
+				params := &ipcache.UpsertParams{
+					IP:                endpointIP,
+					HostIP:            hostIP,
+					ID:                ID,
+					Key:               key,
+					Metadata:          metadata,
+					K8sNamespace:      k8sNamespace,
+					K8sPodName:        k8sPodName,
+					K8sServiceAccount: k8sServiceAccount,
+					NPM:               e.GetK8sPorts(),
+				}
+
+				if err := e.kvstoreSyncher.Upsert(ctx, params); err != nil {
 					return fmt.Errorf("unable to add endpoint IP mapping '%s'->'%d': %w", endpointIP.String(), ID, err)
 				}
 				return nil
@@ -1086,8 +1118,12 @@ func (e *Endpoint) SetIdentity(identity *identityPkg.Identity, newEndpoint bool)
 
 	// Whenever the identity is updated, propagate change to key-value store
 	// of IP to identity mapping.
-	e.runIPIdentitySync(e.IPv4)
-	e.runIPIdentitySync(e.IPv6)
+	if option.Config.EnableIPv4 {
+		e.runIPIdentitySync(e.IPv4)
+	}
+	if option.Config.EnableIPv6 {
+		e.runIPIdentitySync(e.IPv6)
+	}
 
 	if oldIdentity != identity.StringID() {
 		e.getLogger().Info(
@@ -1154,22 +1190,23 @@ func (e *Endpoint) UpdateBandwidthPolicy(bandwidthEgress, bandwidthIngress, prio
 	}
 }
 
-// GetRealizedPolicyRuleLabelsForKey returns the list of policy rule labels
-// which match a given flow key (in host byte-order). The returned
-// LabelArrayList is shallow-copied and therefore must not be mutated.
-// This function explicitly exported to be accessed by code outside of the
-// Cilium source code tree and for testing.
-func (e *Endpoint) GetRealizedPolicyRuleLabelsForKey(key policyTypes.Key) (
-	derivedFrom string,
-	revision uint64,
+// GetPolicyCorrelationInfoForKey returns the list of policy rule labels which match a given flow
+// key (in host byte-order) and associated correlation information.
+func (e *Endpoint) GetPolicyCorrelationInfoForKey(key policyTypes.Key) (
+	info policyTypes.PolicyCorrelationInfo,
 	ok bool,
 ) {
 	e.mutex.RLock()
 	defer e.mutex.RUnlock()
 
-	var err error
-	derivedFrom, err = e.realizedPolicy.GetRuleLabels(key)
-	return derivedFrom, e.policyRevision, err == nil
+	ruleMeta, err := e.realizedPolicy.GetRuleMeta(key)
+	if err != nil {
+		return info, false
+	}
+	info.RuleLabels = ruleMeta.LabelArrayListString()
+	info.Log = ruleMeta.Log()
+	info.Revision = e.policyRevision
+	return info, err == nil
 }
 
 // setDNSRulesLocked is called when the Endpoint's DNS policy has been updated.

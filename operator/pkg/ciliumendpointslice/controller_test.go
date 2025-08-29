@@ -10,36 +10,29 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
-	"github.com/cilium/hive/job"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/goleak"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cilium/cilium/operator/k8s"
 	tu "github.com/cilium/cilium/operator/pkg/ciliumendpointslice/testutils"
 	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/health/types"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sFakeClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
 func TestRegisterController(t *testing.T) {
-	defer goleak.VerifyNone(
-		t,
-		// To ignore goroutine started by the workqueue. It reports metrics
-		// on unfinished work with default tick period of 0.5s - it terminates
-		// no longer than 0.5s after the workqueue is stopped.
-		goleak.IgnoreTopFunction("k8s.io/client-go/util/workqueue.(*Typed[...]).updateUnfinishedWorkLoop"),
-	)
+	defer testutils.GoleakVerifyNone(t)
+
 	var fakeClient k8sClient.Clientset
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	hive := hive.New(
-		k8sClient.FakeClientBuilderCell,
+		k8sFakeClient.FakeClientBuilderCell(),
 		k8s.ResourcesCell,
 		cell.Provide(func() Config {
 			return defaultConfig
@@ -48,12 +41,6 @@ func TestRegisterController(t *testing.T) {
 			return SharedConfig{
 				EnableCiliumEndpointSlice: true,
 			}
-		}),
-		cell.Provide(func(lc cell.Lifecycle, p types.Provider, jr job.Registry) job.Group {
-			h := p.ForModule(cell.FullModuleID{"test"})
-			jg := jr.NewGroup(h)
-			lc.Append(jg)
-			return jg
 		}),
 		metrics.Metric(NewMetrics),
 		cell.Invoke(func(p params) error {
@@ -87,18 +74,18 @@ func TestRegisterController(t *testing.T) {
 }
 
 func TestNotRegisterControllerWithCESDisabled(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 		// To ignore goroutine started by the workqueue. It reports metrics
 		// on unfinished work with default tick period of 0.5s - it terminates
 		// no longer than 0.5s after the workqueue is stopped.
-		goleak.IgnoreTopFunction("k8s.io/client-go/util/workqueue.(*Type).updateUnfinishedWorkLoop"),
+		testutils.GoleakIgnoreTopFunction("k8s.io/client-go/util/workqueue.(*Type).updateUnfinishedWorkLoop"),
 	)
 	var fakeClient k8sClient.Clientset
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	h := hive.New(
-		k8sClient.FakeClientBuilderCell,
+		k8sFakeClient.FakeClientBuilderCell(),
 		k8s.ResourcesCell,
 		cell.Provide(func() Config {
 			return defaultConfig
@@ -107,12 +94,6 @@ func TestNotRegisterControllerWithCESDisabled(t *testing.T) {
 			return SharedConfig{
 				EnableCiliumEndpointSlice: false,
 			}
-		}),
-		cell.Provide(func(lc cell.Lifecycle, p types.Provider, jr job.Registry) job.Group {
-			h := p.ForModule(cell.FullModuleID{"test"})
-			jg := jr.NewGroup(h)
-			lc.Append(jg)
-			return jg
 		}),
 		metrics.Metric(NewMetrics),
 		cell.Invoke(func(p params) error {

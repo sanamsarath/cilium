@@ -2,7 +2,6 @@
 
 # Start the hive and wait for tables to be synchronized before adding k8s objects.
 hive start
-db/initialized
 
 # Add the objects and wait for it to be ingested.
 k8s/add service.yaml endpointslice.yaml cec.yaml
@@ -15,7 +14,7 @@ cmp actual.json cec-expected.json
 
 db/show envoy-resources --format=json --out=actual.json
 sed '"updated-at":.*' '"updated-at": <redacted>,' actual.json
-sed '"id":.*' '"id": <redacted>' actual.json
+sed '"id":.*' '"id": <redacted>,' actual.json
 cmp actual.json envoy-resources-expected.json
 
 ##### 
@@ -78,6 +77,8 @@ kind: CiliumEnvoyConfig
 metadata:
   name: envoy-lb-listener
   namespace: test
+  labels:
+    foo: bar
 spec:
   services:
     - name: echo
@@ -113,6 +114,9 @@ spec:
         "name": "envoy-lb-listener"
       }
     ]
+  },
+  "Labels": {
+    "foo": "bar"
   },
   "SelectsLocalNode": true,
   "Listeners": [
@@ -178,9 +182,9 @@ spec:
     "Name": "echo"
   },
   "Status": {
-    "kind": "Done",
     "updated-at": <redacted>,
-    "id": <redacted>
+    "id": <redacted>,
+    "kind": "Done"
   },
   "Resources": {
     "Listeners": null,
@@ -262,9 +266,9 @@ spec:
     "Name": "envoy-lb-listener"
   },
   "Status": {
-    "kind": "Done",
     "updated-at": <redacted>,
-    "id": <redacted>
+    "id": <redacted>,
+    "kind": "Done"
   },
   "Resources": {
     "Listeners": [
@@ -362,11 +366,7 @@ spec:
   },
   "Redirects": [
     {
-      "k": {
-        "Namespace": "test",
-        "Name": "echo",
-        "Cluster": ""
-      },
+      "k": "test/echo",
       "v": {
         "ProxyPort": 1000,
         "Ports": [
@@ -377,11 +377,7 @@ spec:
   ],
   "ReconciledRedirects": [
     {
-      "k": {
-        "Namespace": "test",
-        "Name": "echo",
-        "Cluster": ""
-      },
+      "k": "test/echo",
       "v": {
         "ProxyPort": 1000,
         "Ports": [
@@ -391,10 +387,6 @@ spec:
     }
   ],
   "ReferencedServices": [
-    {
-      "Namespace": "test",
-      "Name": "echo",
-      "Cluster": ""
-    }
+    "test/echo"
   ]
 }

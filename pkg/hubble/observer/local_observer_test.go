@@ -48,7 +48,6 @@ func noopParser(t *testing.T) *parser.Parser {
 		&testutils.NoopServiceGetter,
 		&testutils.NoopLinkGetter,
 		&testutils.NoopPodMetadataGetter,
-		true,
 	)
 	require.NoError(t, err)
 	return pp
@@ -69,7 +68,7 @@ func TestLocalObserverServer_ServerStatus(t *testing.T) {
 	pp := noopParser(t)
 	s, err := NewLocalServer(pp, nsManager, hivetest.Logger(t), observeroption.WithMaxFlows(container.Capacity1))
 	require.NoError(t, err)
-	res, err := s.ServerStatus(context.Background(), &observerpb.ServerStatusRequest{})
+	res, err := s.ServerStatus(t.Context(), &observerpb.ServerStatusRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), res.SeenFlows)
 	assert.Equal(t, uint64(0), res.NumFlows)
@@ -213,7 +212,7 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -292,9 +291,6 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	req = &observerpb.GetFlowsRequest{
 		Number:    uint64(10),
 		FieldMask: &fieldmaskpb.FieldMask{Paths: fmPaths},
-		Experimental: &observerpb.GetFlowsRequest_Experimental{
-			FieldMask: &fieldmaskpb.FieldMask{Paths: fmPaths},
-		},
 	}
 	err = s.GetFlows(req, fakeServer)
 	assert.NoError(t, err)
@@ -317,9 +313,6 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	req = &observerpb.GetFlowsRequest{
 		Number:    uint64(10),
 		FieldMask: &fieldmaskpb.FieldMask{Paths: []string{""}},
-		Experimental: &observerpb.GetFlowsRequest_Experimental{
-			FieldMask: &fieldmaskpb.FieldMask{Paths: []string{""}},
-		},
 	}
 	err = s.GetFlows(req, fakeServer)
 	assert.EqualError(t, err, "invalid fieldmask")
@@ -358,7 +351,7 @@ func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -377,10 +370,8 @@ func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
 		var msg monitorAPI.AgentNotifyMessage
 		if i == 0 {
 			msg = monitorAPI.StartMessage(time.Unix(42, 1))
-		} else if i%2 == 1 {
-			msg = monitorAPI.IPCacheUpsertedMessage(cidr, uint32(i), nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar")
 		} else {
-			msg = monitorAPI.ServiceDeleteMessage(uint32(i))
+			msg = monitorAPI.IPCacheUpsertedMessage(cidr, uint32(i), nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar")
 		}
 		m <- &observerTypes.MonitorEvent{
 			Timestamp: ts,
@@ -474,7 +465,7 @@ func TestLocalObserverServer_GetFlows_Follow_Since(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -555,7 +546,7 @@ func TestLocalObserverServer_OnFlowDelivery(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -613,7 +604,7 @@ func TestLocalObserverServer_OnGetFlows(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -757,7 +748,7 @@ func TestLocalObserverServer_GetNamespaces(t *testing.T) {
 	})
 	s, err := NewLocalServer(pp, nsManager, hivetest.Logger(t), observeroption.WithMaxFlows(container.Capacity1))
 	require.NoError(t, err)
-	res, err := s.GetNamespaces(context.Background(), &observerpb.GetNamespacesRequest{})
+	res, err := s.GetNamespaces(t.Context(), &observerpb.GetNamespacesRequest{})
 	require.NoError(t, err)
 	expected := &observerpb.GetNamespacesResponse{
 		Namespaces: []*observerpb.Namespace{
@@ -787,7 +778,6 @@ func Benchmark_TrackNamespaces(b *testing.B) {
 		&testutils.NoopServiceGetter,
 		&testutils.NoopLinkGetter,
 		&testutils.NoopPodMetadataGetter,
-		true,
 	)
 	if err != nil {
 		b.Fatal(err)

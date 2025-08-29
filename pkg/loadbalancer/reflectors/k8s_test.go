@@ -5,6 +5,7 @@ package reflectors
 
 import (
 	"log/slog"
+	"maps"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -14,37 +15,32 @@ import (
 	slim_discovery_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
 	"github.com/cilium/cilium/pkg/k8s/testutils"
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/source"
 )
 
 var (
 	benchmarkExternalConfig = loadbalancer.ExternalConfig{
-		EnableIPv4:                      true,
-		EnableIPv6:                      true,
-		ExternalClusterIP:               true,
-		EnableHealthCheckNodePort:       true,
-		KubeProxyReplacement:            true,
-		NodePortMin:                     10000,
-		NodePortMax:                     30000,
-		NodePortAlg:                     "random",
-		LoadBalancerAlgorithmAnnotation: false,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		KubeProxyReplacement: true,
 	}
 )
 
 func BenchmarkConvertService(b *testing.B) {
-	obj, err := testutils.DecodeFile("../experimental/benchmark/testdata/service.yaml")
+	obj, err := testutils.DecodeFile("../benchmark/testdata/service.yaml")
 	if err != nil {
 		panic(err)
 	}
 	svc := obj.(*slim_corev1.Service)
 
 	for b.Loop() {
-		convertService(benchmarkExternalConfig, slog.New(slog.DiscardHandler), svc)
+		convertService(loadbalancer.DefaultConfig, benchmarkExternalConfig, slog.New(slog.DiscardHandler), nil, svc, source.Kubernetes)
 	}
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "services/sec")
 }
 
 func BenchmarkParseEndpointSlice(b *testing.B) {
-	obj, err := testutils.DecodeFile("../experimental/benchmark/testdata/endpointslice.yaml")
+	obj, err := testutils.DecodeFile("../benchmark/testdata/endpointslice.yaml")
 	if err != nil {
 		panic(err)
 	}
@@ -58,16 +54,17 @@ func BenchmarkParseEndpointSlice(b *testing.B) {
 }
 
 func BenchmarkConvertEndpoints(b *testing.B) {
-	obj, err := testutils.DecodeFile("../experimental/benchmark/testdata/endpointslice.yaml")
+	obj, err := testutils.DecodeFile("../benchmark/testdata/endpointslice.yaml")
 	if err != nil {
 		panic(err)
 	}
 	epSlice := obj.(*slim_discovery_v1.EndpointSlice)
 	logger := hivetest.Logger(b)
 	eps := k8s.ParseEndpointSliceV1(logger, epSlice)
+	backends := maps.All(eps.Backends)
 
 	for b.Loop() {
-		convertEndpoints(benchmarkExternalConfig, eps)
+		convertEndpoints(logger, benchmarkExternalConfig, eps.ServiceName, backends)
 	}
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "endpoints/sec")
 }

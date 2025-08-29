@@ -28,7 +28,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/k8s"
-	"github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_discovery_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1"
@@ -38,7 +38,6 @@ import (
 	lbreconciler "github.com/cilium/cilium/pkg/loadbalancer/reconciler"
 	"github.com/cilium/cilium/pkg/loadbalancer/reflectors"
 	"github.com/cilium/cilium/pkg/loadbalancer/writer"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/maglev"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
@@ -54,45 +53,47 @@ var (
 	//go:embed testdata/endpointslice.yaml
 	endpointSliceYaml []byte
 
-	maglevConfig = maglev.Config{
-		MaglevTableSize: 1021,
-		MaglevHashSeed:  maglev.DefaultHashSeed,
-	}
+	maglevConfig, _ = maglev.UserConfig{
+		TableSize: 1021,
+		HashSeed:  maglev.DefaultHashSeed,
+	}.ToConfig()
 )
 
 func RunBenchmark(testSize int, iterations int, loglevel slog.Level, validate bool) {
 	option.Config.EnableIPv4 = true
 	option.Config.EnableIPv6 = true
 
-	svcs, epSlices := ServicesAndSlices(testSize)
-
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: loglevel}))
+
+	svcs, epSlices := ServicesAndSlices(log, testSize)
 
 	var maps lbmaps.LBMaps
 	if testutils.IsPrivileged() {
 		bpfMaps := &lbmaps.BPFLBMaps{
 			Log:    log,
 			Pinned: false,
-			Cfg: loadbalancer.ExternalConfig{
-				ZoneMapper: &option.DaemonConfig{},
-				LBMapsConfig: loadbalancer.LBMapsConfig{
-					MaxSockRevNatMapEntries:  3 * testSize,
-					ServiceMapMaxEntries:     3 * testSize,
-					BackendMapMaxEntries:     3 * testSize,
-					RevNatMapMaxEntries:      3 * testSize,
-					AffinityMapMaxEntries:    3 * testSize,
-					SourceRangeMapMaxEntries: 3 * testSize,
-					MaglevMapMaxEntries:      3 * testSize,
+			Cfg: loadbalancer.Config{
+				UserConfig: loadbalancer.UserConfig{
+					RetryBackoffMin:         time.Second,
+					RetryBackoffMax:         time.Second,
+					LBMapEntries:            3 * testSize,
+					LBServiceMapEntries:     3 * testSize,
+					LBBackendMapEntries:     3 * testSize,
+					LBRevNatEntries:         3 * testSize,
+					LBAffinityMapEntries:    3 * testSize,
+					LBSourceRangeAllTypes:   false,
+					LBSourceRangeMapEntries: 3 * testSize,
+					LBMaglevMapEntries:      3 * testSize,
+					LBSockRevNatEntries:     3 * testSize,
 				},
-				EnableIPv4:                      true,
-				EnableIPv6:                      true,
-				ExternalClusterIP:               true,
-				EnableHealthCheckNodePort:       true,
-				KubeProxyReplacement:            true,
-				NodePortMin:                     30000,
-				NodePortMax:                     40000,
-				NodePortAlg:                     "random",
-				LoadBalancerAlgorithmAnnotation: false,
+				NodePortMin: loadbalancer.NodePortMinDefault,
+				NodePortMax: loadbalancer.NodePortMaxDefault,
+			},
+			ExtCfg: loadbalancer.ExternalConfig{
+				ZoneMapper:           &option.DaemonConfig{},
+				EnableIPv4:           true,
+				EnableIPv6:           true,
+				KubeProxyReplacement: true,
 			},
 			MaglevCfg: maglevConfig,
 		}
@@ -314,7 +315,7 @@ func mapFunc[A, B any](xs []A, fn func(A) B) []B {
 	return out
 }
 
-func ServicesAndSlices(testSize int) (svcs []*slim_corev1.Service, epSlices []*k8s.Endpoints) {
+func ServicesAndSlices(logger *slog.Logger, testSize int) (svcs []*slim_corev1.Service, epSlices []*k8s.Endpoints) {
 	svcs = make([]*slim_corev1.Service, 0, testSize)
 	epSlices = make([]*k8s.Endpoints, 0, testSize)
 
@@ -372,7 +373,7 @@ func ServicesAndSlices(testSize int) (svcs []*slim_corev1.Service, epSlices []*k
 
 		tmpSlice.Name = fmt.Sprintf("%s-%06d", slice.Name, j)
 
-		epSlices = append(epSlices, k8s.ParseEndpointSliceV1(logging.DefaultSlogLogger, &tmpSlice))
+		epSlices = append(epSlices, k8s.ParseEndpointSliceV1(logger, &tmpSlice))
 	}
 	return
 }
@@ -406,11 +407,11 @@ func checkTables(db *statedb.DB, writer *writer.Writer, svcs []*slim_corev1.Serv
 			i := 0
 			for svc := range writer.Services().All(txn) {
 				want := svcs[i]
-				if svc.Name.Namespace != want.Namespace {
-					err = errors.Join(err, fmt.Errorf("Incorrect namespace for service #%06d, got %q, want %q", i, svc.Name.Namespace, want.Namespace))
+				if svc.Name.Namespace() != want.Namespace {
+					err = errors.Join(err, fmt.Errorf("Incorrect namespace for service #%06d, got %q, want %q", i, svc.Name.Namespace(), want.Namespace))
 				}
-				if svc.Name.Name != want.Name {
-					err = errors.Join(err, fmt.Errorf("Incorrect name for service #%06d, got %q, want %q", i, svc.Name.Name, want.Name))
+				if svc.Name.Name() != want.Name {
+					err = errors.Join(err, fmt.Errorf("Incorrect name for service #%06d, got %q, want %q", i, svc.Name.Name(), want.Name))
 				}
 				if svc.Source != "k8s" {
 					err = errors.Join(err, fmt.Errorf("Incorrect source for service #%06d, got %q, want %q", i, svc.Source, "k8s"))
@@ -434,15 +435,15 @@ func checkTables(db *statedb.DB, writer *writer.Writer, svcs []*slim_corev1.Serv
 			i := 0
 			for fe := range writer.Frontends().All(txn) {
 				want := svcs[i]
-				if fe.ServiceName.Namespace != want.Namespace {
-					err = errors.Join(err, fmt.Errorf("Incorrect namespace for frontend #%06d, got %q, want %q", i, fe.ServiceName.Namespace, want.Namespace))
+				if fe.ServiceName.Namespace() != want.Namespace {
+					err = errors.Join(err, fmt.Errorf("Incorrect namespace for frontend #%06d, got %q, want %q", i, fe.ServiceName.Namespace(), want.Namespace))
 				}
-				if fe.ServiceName.Name != want.Name {
-					err = errors.Join(err, fmt.Errorf("Incorrect name for frontend #%06d, got %q, want %q", i, fe.ServiceName.Name, want.Name))
+				if fe.ServiceName.Name() != want.Name {
+					err = errors.Join(err, fmt.Errorf("Incorrect name for frontend #%06d, got %q, want %q", i, fe.ServiceName.Name(), want.Name))
 				}
 				wantIP, _ := netip.ParseAddr(want.Spec.ClusterIP)
-				if fe.Address.AddrCluster.Addr() != wantIP {
-					err = errors.Join(err, fmt.Errorf("Incorrect address for frontend #%06d, got %v, want %v", i, fe.Address.AddrCluster.Addr(), wantIP))
+				if fe.Address.Addr() != wantIP {
+					err = errors.Join(err, fmt.Errorf("Incorrect address for frontend #%06d, got %v, want %v", i, fe.Address.Addr(), wantIP))
 				}
 				if fe.Type != loadbalancer.SVCType(want.Spec.Type) {
 					err = errors.Join(err, fmt.Errorf("Incorrect service type for frontend #%06d, got %v, want %v", i, fe.Type, loadbalancer.SVCType(want.Spec.Type)))
@@ -450,13 +451,13 @@ func checkTables(db *statedb.DB, writer *writer.Writer, svcs []*slim_corev1.Serv
 				if fe.PortName != loadbalancer.FEPortName(want.Spec.Ports[0].Name) {
 					err = errors.Join(err, fmt.Errorf("Incorrect port name for frontend #%06d, got %v, want %v", i, fe.PortName, loadbalancer.FEPortName(want.Spec.Ports[0].Name)))
 				}
-				if fe.Status.Kind != "Done" {
+				if fe.Status.Kind != reconciler.StatusKindDone {
 					err = errors.Join(err, fmt.Errorf("Incorrect status for frontend #%06d, got %v, want %v", i, fe.Status.Kind, "Done"))
 				}
 				backends := slices.Collect(statedb.ToSeq(iter.Seq2[loadbalancer.BackendParams, statedb.Revision](fe.Backends)))
 				for wantAddr := range epSlices[i].Backends { // There is only one element in this map.
-					if backends[0].Address.AddrCluster != wantAddr {
-						err = errors.Join(err, fmt.Errorf("Incorrect backend address for frontend #%06d, got %v, want %v", i, backends[0].Address.AddrCluster, wantAddr))
+					if backends[0].Address.AddrCluster() != wantAddr {
+						err = errors.Join(err, fmt.Errorf("Incorrect backend address for frontend #%06d, got %v, want %v", i, backends[0].Address.AddrCluster(), wantAddr))
 					}
 				}
 
@@ -473,15 +474,15 @@ func checkTables(db *statedb.DB, writer *writer.Writer, svcs []*slim_corev1.Serv
 			for be := range writer.Backends().All(txn) {
 				want := epSlices[i]
 				for wantAddr, wantBe := range want.Backends { // There is only one element in this map.
-					if be.Address.AddrCluster != wantAddr {
-						err = errors.Join(err, fmt.Errorf("Incorrect address for backend #%06d, got %v, want %v", i, be.Address.AddrCluster, wantAddr))
+					if be.Address.AddrCluster() != wantAddr {
+						err = errors.Join(err, fmt.Errorf("Incorrect address for backend #%06d, got %v, want %v", i, be.Address.AddrCluster(), wantAddr))
 					}
-					for _, wantPort := range wantBe.Ports { // There is only one element in this map.
-						if be.Address.Port != wantPort.Port {
-							err = errors.Join(err, fmt.Errorf("Incorrect port for backend #%06d, got %v, want %v", i, be.Address.Port, wantPort.Port))
+					for wantPort := range wantBe.Ports { // There is only one element in this map.
+						if be.Address.Port() != wantPort.Port {
+							err = errors.Join(err, fmt.Errorf("Incorrect port for backend #%06d, got %v, want %v", i, be.Address.Port(), wantPort.Port))
 						}
-						if be.Address.Protocol != wantPort.Protocol {
-							err = errors.Join(err, fmt.Errorf("Incorrect protocol for backend #%06d, got %v, want %v", i, be.Address.Protocol, wantPort.Protocol))
+						if be.Address.Protocol() != wantPort.Protocol {
+							err = errors.Join(err, fmt.Errorf("Incorrect protocol for backend #%06d, got %v, want %v", i, be.Address.Protocol(), wantPort.Protocol))
 						}
 					}
 				}
@@ -489,8 +490,8 @@ func checkTables(db *statedb.DB, writer *writer.Writer, svcs []*slim_corev1.Serv
 					err = errors.Join(err, fmt.Errorf("Incorrect instances count for backend #%06d, got %v, want %v", i, be.Instances.Len(), 1))
 				} else {
 					for k, instance := range be.Instances.All() { // There should
-						if k.ServiceName.Name != svcs[i].Name {
-							err = errors.Join(err, fmt.Errorf("Incorrect service name for backend #%06d, got %v, want %v", i, k.ServiceName.Name, svcs[i].Name))
+						if k.ServiceName.Name() != svcs[i].Name {
+							err = errors.Join(err, fmt.Errorf("Incorrect service name for backend #%06d, got %v, want %v", i, k.ServiceName.Name(), svcs[i].Name))
 						}
 						if state, tmpErr := instance.State.String(); tmpErr != nil || state != "active" {
 							err = errors.Join(err, fmt.Errorf("Incorrect state for backend #%06d, got %q, want %q", i, state, "active"))
@@ -524,12 +525,9 @@ func testHive(maps lbmaps.LBMaps,
 	bo **lbreconciler.BPFOps,
 ) *hive.Hive {
 	extConfig := loadbalancer.ExternalConfig{
-		ZoneMapper:        &option.DaemonConfig{},
-		EnableIPv4:        true,
-		EnableIPv6:        true,
-		ExternalClusterIP: false,
-		NodePortMin:       option.NodePortMinDefault,
-		NodePortMax:       option.NodePortMaxDefault,
+		ZoneMapper: &option.DaemonConfig{},
+		EnableIPv4: true,
+		EnableIPv6: true,
 	}
 
 	return hive.New(
@@ -537,15 +535,15 @@ func testHive(maps lbmaps.LBMaps,
 			"loadbalancer-test",
 			"Test module",
 
-			client.FakeClientCell,
-			node.LocalNodeStoreCell,
+			k8sClient.FakeClientCell(),
+			node.LocalNodeStoreTestCell,
 
 			cell.Provide(
 				func() loadbalancer.Config {
 					return loadbalancer.Config{
-						EnableExperimentalLB: true,
-						RetryBackoffMin:      time.Millisecond,
-						RetryBackoffMax:      time.Millisecond,
+						UserConfig:  loadbalancer.DefaultUserConfig,
+						NodePortMin: loadbalancer.NodePortMinDefault,
+						NodePortMax: loadbalancer.NodePortMaxDefault,
 					}
 				},
 				func() loadbalancer.ExternalConfig { return extConfig },
@@ -564,9 +562,9 @@ func testHive(maps lbmaps.LBMaps,
 					return maps
 				},
 
-				func(lc cell.Lifecycle) (*maglev.Maglev, maglev.Config, error) {
-					m, err := maglev.New(maglevConfig, lc)
-					return m, maglevConfig, err
+				func(lc cell.Lifecycle) (*maglev.Maglev, maglev.Config) {
+					m := maglev.New(maglevConfig, lc)
+					return m, maglevConfig
 				},
 			),
 
@@ -596,7 +594,6 @@ func testHive(maps lbmaps.LBMaps,
 				source.NewSources,
 			),
 			cell.Invoke(func(db *statedb.DB, nodeAddrs statedb.RWTable[tables.NodeAddress]) {
-				db.RegisterTable(nodeAddrs)
 				txn := db.WriteTxn(nodeAddrs)
 
 				for _, addr := range nodePortAddrs {

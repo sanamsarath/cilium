@@ -271,9 +271,7 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 		controller.ControllerParams{
 			Group: restoreEndpointIdentityControllerGroup,
 			DoFunc: func(ctx context.Context) (err error) {
-				allocateCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
-				defer cancel()
-				id, _, err = e.allocator.AllocateIdentity(allocateCtx, l, true, identity.InvalidIdentity)
+				id, _, err = e.allocator.AllocateIdentity(ctx, l, true, identity.InvalidIdentity)
 				if err != nil {
 					return err
 				}
@@ -305,12 +303,12 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 			controller.ControllerParams{
 				Group: initialGlobalIdentitiesControllerGroup,
 				DoFunc: func(ctx context.Context) (err error) {
-					identityCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
-					defer cancel()
-
-					err = e.allocator.WaitForInitialGlobalIdentities(identityCtx)
-					if err != nil {
+					err = e.allocator.WaitForInitialGlobalIdentities(ctx)
+					switch {
+					case err != nil && !errors.Is(err, context.Canceled):
 						e.getLogger().Warn("Failed while waiting for initial global identities", logfields.Error, err)
+						fallthrough
+					case err != nil:
 						return err
 					}
 					close(gotInitialGlobalIdentities)
@@ -327,20 +325,8 @@ func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 		}
 	}
 
-	// Wait for ipcache sync before regeneration for endpoints including
-	// the ones with fixed identity (e.g. host endpoint), this ensures that
-	// the regenerated datapath always lookups from a ready ipcache map.
-	// Additionally wait for node synchronization, as nodes also contribute
-	// entries to the ipcache map, most notably about the remote node IPs.
-	if option.Config.KVStore != "" {
-		if err := regenerator.WaitForKVStoreSync(e.aliveCtx); err != nil {
-			return ErrNotAlive
-		}
-	}
-
-	// Wait for ipcache and identities synchronization from all remote clusters,
-	// to prevent disrupting cross-cluster connections on endpoint regeneration.
-	if err := regenerator.WaitForClusterMeshIPIdentitiesSync(e.aliveCtx); err != nil {
+	// Wait for registered initializers to complete before allowing endpoint regeneration.
+	if err := regenerator.WaitForFence(e.aliveCtx); err != nil {
 		return err
 	}
 
@@ -419,6 +405,7 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 		DockerEndpointID:         e.dockerEndpointID,
 		IfName:                   e.ifName,
 		IfIndex:                  e.ifIndex,
+		ParentIfIndex:            e.parentIfIndex,
 		ContainerIfName:          e.containerIfName,
 		DisableLegacyIdentifiers: e.disableLegacyIdentifiers,
 		Labels:                   e.labels,
@@ -478,6 +465,11 @@ type serializableEndpoint struct {
 
 	// ifIndex is the interface index of the host face interface (veth pair)
 	IfIndex int
+
+	// parentIfIndex is the interface index of the interface with which the endpoint
+	// IP is associated. In some scenarios, the network will expect traffic with
+	// the endpoint IP to be sent via the parent interface.
+	ParentIfIndex int
 
 	// ContainerIfName is the name of the container facing interface (veth pair).
 	ContainerIfName string
@@ -568,7 +560,7 @@ func (ep *Endpoint) UnmarshalJSON(raw []byte) error {
 		Labels:     labels.NewOpLabels(),
 		Options:    option.NewIntOptions(&EndpointMutableOptionLibrary),
 		DNSHistory: fqdn.NewDNSCacheWithLimit(option.Config.ToFQDNsMinTTL, option.Config.ToFQDNsMaxIPsPerHost),
-		DNSZombies: fqdn.NewDNSZombieMappings(option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
+		DNSZombies: fqdn.NewDNSZombieMappings(ep.getLogger(), option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
 	}
 	if err := json.Unmarshal(raw, restoredEp); err != nil {
 		return fmt.Errorf("error unmarshaling serializableEndpoint from base64 representation: %w", err)
@@ -586,13 +578,14 @@ func (ep *Endpoint) MarshalJSON() ([]byte, error) {
 func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.ID = r.ID
 	ep.createdAt = time.Now()
-	ep.InitialEnvoyPolicyComputed = make(chan struct{})
+	ep.initialEnvoyPolicyComputed = make(chan struct{})
 	ep.containerName.Store(&r.ContainerName)
 	ep.containerID.Store(&r.ContainerID)
 	ep.dockerNetworkID = r.DockerNetworkID
 	ep.dockerEndpointID = r.DockerEndpointID
 	ep.ifName = r.IfName
 	ep.ifIndex = r.IfIndex
+	ep.parentIfIndex = r.ParentIfIndex
 	ep.containerIfName = r.ContainerIfName
 	ep.disableLegacyIdentifiers = r.DisableLegacyIdentifiers
 	ep.labels = r.Labels

@@ -29,6 +29,8 @@
 #include "lib/tailcall.h"
 #include "lib/common.h"
 #include "lib/edt.h"
+#include "lib/encrypt.h"
+#include "lib/eps.h"
 #include "lib/ipv6.h"
 #include "lib/eth.h"
 #include "lib/dbg.h"
@@ -47,7 +49,6 @@
 #include "lib/vtep.h"
 #include "lib/arp.h"
 #include "lib/encap.h"
-#include "lib/eps.h"
 #endif /* ENABLE_VTEP */
 
 #define overlay_ingress_policy_hook(ctx, ip4, identity, ext_err) CTX_ACT_OK
@@ -62,7 +63,7 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 	void *data_end, *data;
 	struct ipv6hdr *ip6;
 	struct endpoint_info *ep;
-	bool decrypted;
+	bool decrypted = false;
 	bool __maybe_unused is_dsr = false;
 	fraginfo_t fraginfo __maybe_unused;
 
@@ -106,7 +107,9 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 	 */
 	info = lookup_ip6_remote_endpoint((union v6addr *)&ip6->saddr, 0);
 
+#ifdef ENABLE_IPSEC
 	decrypted = ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
+#endif
 	if (decrypted) {
 		if (info)
 			*identity = info->sec_identity;
@@ -153,8 +156,8 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 		ctx_change_type(ctx, PACKET_HOST);
 
 		send_trace_notify(ctx, TRACE_TO_STACK, *identity, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
+				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
+				  TRACE_REASON_ENCRYPTED, 0, bpf_htons(ETH_P_IPV6));
 
 		return CTX_ACT_OK;
 	}
@@ -181,17 +184,25 @@ not_esp:
 			set_identity_mark(ctx, *identity, MARK_MAGIC_EGW_DONE);
 
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
-			ret = egress_gw_fib_lookup_and_redirect_v6(ctx, &snat_addr,
-								   &daddr, egress_ifindex,
-								   ext_err);
-			if (ret != CTX_ACT_OK)
-				return ret;
-
-			if (!revalidate_data(ctx, &data, &data_end, &ip6))
-				return DROP_INVALID;
+			return egress_gw_fib_lookup_and_redirect_v6(ctx, &snat_addr,
+								    &daddr, egress_ifindex,
+								    ext_err);
 		}
 	}
 #endif /* ENABLE_EGRESS_GATEWAY_COMMON */
+
+#if defined(ENABLE_DSR) && (DSR_ENCAP_MODE == DSR_ENCAP_GENEVE)
+	/* Pass incoming packets which will be returned using Geneve DSR
+	 * to host-stack for conntrack entry insertion.
+	 * Geneve DSR reply packets are processed by the host-stack,
+	 * so this logic is needed to prevent the packets from being handled
+	 * by netfilter in an unintended way.
+	 */
+	if (!is_defined(ENABLE_HOST_ROUTING) && is_dsr) {
+		ctx_change_type(ctx, PACKET_HOST);
+		return CTX_ACT_OK;
+	}
+#endif
 
 	/* Deliver to local (non-host) endpoint: */
 	ep = lookup_ip6_endpoint(ip6);
@@ -216,7 +227,7 @@ not_esp:
 	}
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_FROM_OVERLAY)
+__declare_tail(CILIUM_CALL_IPV6_FROM_OVERLAY)
 int tail_handle_ipv6(struct __ctx_buff *ctx)
 {
 	__u32 src_sec_identity = ctx_load_and_clear_meta(ctx, CB_SRC_LABEL);
@@ -306,7 +317,7 @@ static __always_inline int handle_inter_cluster_revsnat(struct __ctx_buff *ctx,
 	return DROP_UNROUTABLE;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_INTER_CLUSTER_REVSNAT)
+__declare_tail(CILIUM_CALL_IPV4_INTER_CLUSTER_REVSNAT)
 int tail_handle_inter_cluster_revsnat(struct __ctx_buff *ctx)
 {
 	int ret;
@@ -329,7 +340,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	void *data_end, *data;
 	struct iphdr *ip4;
 	struct endpoint_info *ep;
-	bool decrypted;
+	bool decrypted = false;
 	bool __maybe_unused is_dsr = false;
 	fraginfo_t fraginfo __maybe_unused;
 	int ret;
@@ -384,7 +395,9 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	 */
 	info = lookup_ip4_remote_endpoint(ip4->saddr, 0);
 
+#ifdef ENABLE_IPSEC
 	decrypted = ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
+#endif
 	/* If packets are decrypted the key has already been pushed into metadata. */
 	if (decrypted) {
 		if (info)
@@ -464,8 +477,8 @@ skip_vtep:
 		ctx_change_type(ctx, PACKET_HOST);
 
 		send_trace_notify(ctx, TRACE_TO_STACK, *identity, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
+				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
+				  TRACE_REASON_ENCRYPTED, 0, bpf_htons(ETH_P_IP));
 
 		return CTX_ACT_OK;
 	}
@@ -491,17 +504,25 @@ not_esp:
 			set_identity_mark(ctx, *identity, MARK_MAGIC_EGW_DONE);
 
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
-			ret = egress_gw_fib_lookup_and_redirect(ctx, snat_addr,
-								daddr, egress_ifindex,
-								ext_err);
-			if (ret != CTX_ACT_OK)
-				return ret;
-
-			if (!revalidate_data(ctx, &data, &data_end, &ip4))
-				return DROP_INVALID;
+			return egress_gw_fib_lookup_and_redirect(ctx, snat_addr,
+								 daddr, egress_ifindex,
+								 ext_err);
 		}
 	}
 #endif /* ENABLE_EGRESS_GATEWAY_COMMON */
+
+#if defined(ENABLE_DSR) && (DSR_ENCAP_MODE == DSR_ENCAP_GENEVE)
+	/* Pass incoming packets which will be returned using Geneve DSR
+	 * to host-stack for conntrack entry insertion.
+	 * Geneve DSR reply packets are processed by the host-stack,
+	 * so this logic is needed to prevent the packets from being handled
+	 * by netfilter in an unintended way.
+	 */
+	if (!is_defined(ENABLE_HOST_ROUTING) && is_dsr) {
+		ctx_change_type(ctx, PACKET_HOST);
+		return CTX_ACT_OK;
+	}
+#endif
 
 	/* Deliver to local (non-host) endpoint: */
 	ep = lookup_ip4_endpoint(ip4);
@@ -522,7 +543,7 @@ not_esp:
 	return ipv4_host_delivery(ctx, ip4);
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_FROM_OVERLAY)
+__declare_tail(CILIUM_CALL_IPV4_FROM_OVERLAY)
 int tail_handle_ipv4(struct __ctx_buff *ctx)
 {
 	__u32 src_sec_identity = ctx_load_and_clear_meta(ctx, CB_SRC_LABEL);
@@ -541,7 +562,7 @@ int tail_handle_ipv4(struct __ctx_buff *ctx)
  * ARP responder for ARP requests from VTEP
  * Respond to remote VTEP endpoint with cilium_vxlan MAC
  */
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_ARP)
+__declare_tail(CILIUM_CALL_ARP)
 int tail_handle_arp(struct __ctx_buff *ctx)
 {
 	struct remote_endpoint_info fake_info = {0};
@@ -578,7 +599,8 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 		fake_info.flag_has_tunnel_ep = true;
 		ret = __encap_and_redirect_with_nodeid(ctx, &fake_info,
 						       LOCAL_NODE_ID, WORLD_IPV4_ID,
-						       WORLD_IPV4_ID, &trace);
+						       WORLD_IPV4_ID, &trace,
+						       bpf_htons(ETH_P_ARP));
 		if (IS_ERR(ret))
 			goto drop_err;
 
@@ -592,7 +614,7 @@ drop_err:
 pass_to_stack:
 	send_trace_notify(ctx, TRACE_TO_STACK, UNKNOWN_ID, UNKNOWN_ID,
 			  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
-			  trace.reason, trace.monitor);
+			  trace.reason, trace.monitor, bpf_htons(ETH_P_ARP));
 	return CTX_ACT_OK;
 }
 #endif /* ENABLE_VTEP */
@@ -638,7 +660,7 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 {
 	__u32 src_sec_identity = 0;
 	__s8 ext_err = 0;
-	bool decrypted;
+	bool decrypted = false;
 	__u16 proto;
 	int ret;
 
@@ -670,7 +692,9 @@ int cil_from_overlay(struct __ctx_buff *ctx)
  * if the packets are ESP, because it doesn't matter for the
  * non-IPSec mode.
  */
+#ifdef ENABLE_IPSEC
 	decrypted = ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
+#endif
 
 	switch (proto) {
 #if defined(ENABLE_IPV4) || defined(ENABLE_IPV6)
@@ -711,8 +735,8 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 #ifdef ENABLE_IPSEC
 	if (is_esp(ctx, proto))
 		send_trace_notify(ctx, TRACE_FROM_OVERLAY, src_sec_identity, UNKNOWN_ID,
-				  TRACE_EP_ID_UNKNOWN,
-				  ctx->ingress_ifindex, TRACE_REASON_ENCRYPTED, 0);
+				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
+				  TRACE_REASON_ENCRYPTED, 0, proto);
 	else
 #endif
 	{
@@ -726,7 +750,7 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 
 		send_trace_notify(ctx, obs_point, src_sec_identity, UNKNOWN_ID,
 				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
-				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
+				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN, proto);
 	}
 
 	switch (proto) {

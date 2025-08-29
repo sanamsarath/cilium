@@ -13,9 +13,12 @@ import (
 
 	daemonk8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/datapath/tables"
+	envoyCfg "github.com/cilium/cilium/pkg/envoy/config"
 	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
+	"github.com/cilium/cilium/pkg/kpr"
 	"github.com/cilium/cilium/pkg/maglev"
+	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
@@ -26,11 +29,14 @@ import (
 func TestCell(t *testing.T) {
 
 	h := hive.New(
-		client.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		daemonk8s.ResourcesCell,
+		cell.Config(envoyCfg.SecretSyncConfig{}),
 		daemonk8s.TablesCell,
 		maglev.Cell,
-		node.LocalNodeStoreCell,
+		node.LocalNodeStoreTestCell,
+		metrics.Cell,
+		kpr.Cell,
 		Cell,
 		cell.Provide(source.NewSources),
 		cell.Provide(
@@ -40,7 +46,6 @@ func TestCell(t *testing.T) {
 				return &option.DaemonConfig{}
 			},
 		),
-		cell.Invoke(statedb.RegisterTable[tables.NodeAddress]),
 	)
 	require.NoError(t, h.Populate(hivetest.Logger(t)))
 }

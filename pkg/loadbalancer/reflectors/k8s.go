@@ -13,51 +13,46 @@ import (
 	"maps"
 	"net"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
 	"github.com/cilium/statedb"
 	"github.com/cilium/stream"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	daemonK8s "github.com/cilium/cilium/daemon/k8s"
-	"github.com/cilium/cilium/pkg/annotation"
-	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/container"
-	"github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
-	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	lbmaps "github.com/cilium/cilium/pkg/loadbalancer/maps"
 	"github.com/cilium/cilium/pkg/loadbalancer/writer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
 )
 
 const (
 	// reflectorBufferSize is the maximum size of the event buffer.
-	reflectorBufferSize = 5000
+	reflectorBufferSize = 500
 
 	// reflectorWaitTime is the maximum amount of time to try and fill the buffer.
 	// A higher wait time will reduce processing of transient states and increases
 	// throughput as it gives bigger batches downstream for processing. Batching
 	// also helps to combine related objects, e.g. a Service may have multiple
 	// associated EndpointSlices and preferably these would be processed together.
-	reflectorWaitTime = 100 * time.Millisecond
+	reflectorWaitTime = 500 * time.Millisecond
 )
 
-// ReflectorCell reflects Kubernetes Service and EndpointSlice objects to the
+// K8sReflectorCell reflects Kubernetes Service and EndpointSlice objects to the
 // load-balancing tables.
 //
 // Note that this implementation uses Resource[*Service] and Resource[*Endpoints],
@@ -65,12 +60,36 @@ const (
 // times. We should instead have a reflector that is built directly on the client-go
 // reflector (k8s.RegisterReflector) and not populate an intermediate cache.Store.
 // But as we're still experimenting it's easier to build on what already exists.
-var ReflectorCell = cell.Module(
-	"reflector",
+var K8sReflectorCell = cell.Module(
+	"k8s-reflector",
 	"Reflects load-balancing state from Kubernetes",
 
+	// Bridge Resource[XYZ] to Observable[Event[XYZ]]. Makes it easier to
+	// test [ReflectorCell].
+	cell.ProvidePrivate(resourcesToStreams),
 	cell.Invoke(RegisterK8sReflector),
 )
+
+type resourceIn struct {
+	cell.In
+	ServicesResource  resource.Resource[*slim_corev1.Service]
+	EndpointsResource resource.Resource[*k8s.Endpoints]
+}
+
+type StreamsOut struct {
+	cell.Out
+	ServicesStream  stream.Observable[resource.Event[*slim_corev1.Service]]
+	EndpointsStream stream.Observable[resource.Event[*k8s.Endpoints]]
+}
+
+// resourcesToStreams extracts the stream.Observable from resource.Resource.
+// This makes the reflector easier to test as its API surface is reduced.
+func resourcesToStreams(in resourceIn) StreamsOut {
+	return StreamsOut{
+		ServicesStream:  in.ServicesResource,
+		EndpointsStream: in.EndpointsResource,
+	}
+}
 
 type reflectorParams struct {
 	cell.In
@@ -83,9 +102,12 @@ type reflectorParams struct {
 	EndpointsResource      stream.Observable[resource.Event[*k8s.Endpoints]]
 	Pods                   statedb.Table[daemonK8s.LocalPod]
 	Writer                 *writer.Writer
+	Config                 loadbalancer.Config
 	ExtConfig              loadbalancer.ExternalConfig
 	HaveNetNSCookieSupport lbmaps.HaveNetNSCookieSupport
 	TestConfig             *loadbalancer.TestConfig `optional:"true"`
+	LocalNodeStore         *node.LocalNodeStore
+	SVCMetrics             SVCMetrics `optional:"true"`
 }
 
 func (p reflectorParams) waitTime() time.Duration {
@@ -100,6 +122,10 @@ func RegisterK8sReflector(p reflectorParams) {
 	if !p.Writer.IsEnabled() || p.ServicesResource == nil {
 		return
 	}
+	if p.SVCMetrics == nil {
+		p.SVCMetrics = NewSVCMetricsNoop()
+	}
+
 	podsComplete := p.Writer.RegisterInitializer("k8s-pods")
 	epsComplete := p.Writer.RegisterInitializer("k8s-endpoints")
 	svcComplete := p.Writer.RegisterInitializer("k8s-services")
@@ -133,12 +159,18 @@ func runPodReflector(ctx context.Context, health cell.Health, p reflectorParams,
 	processBuffer := func(txn writer.WriteTxn, buf iter.Seq2[types.NamespacedName, statedb.Change[daemonK8s.LocalPod]]) {
 		for _, change := range buf {
 			obj := change.Object.Pod
+			if obj.Spec.HostNetwork {
+				continue
+			}
+
 			podName := obj.Namespace + "/" + obj.Name
 			if change.Deleted {
 				rh.update(podName, nil)
-				if err := deleteHostPort(p, txn, obj); err != nil {
-					p.Log.Error("BUG: Unexpected failure in deleteHostPort",
-						logfields.Error, err)
+				if p.ExtConfig.KubeProxyReplacement {
+					if err := deleteHostPort(p, txn, obj); err != nil {
+						p.Log.Error("BUG: Unexpected failure in deleteHostPort",
+							logfields.Error, err)
+					}
 				}
 			} else {
 				switch obj.Status.Phase {
@@ -146,18 +178,24 @@ func runPodReflector(ctx context.Context, health cell.Health, p reflectorParams,
 					// Pod has been terminated. Clean up the HostPort already even before the Pod object
 					// has been removed to free up the HostPort for other pods.
 					rh.update(podName, nil)
-					if err := deleteHostPort(p, txn, obj); err != nil {
-						p.Log.Error("BUG: Unexpected failure in deleteHostPort",
-							logfields.Error, err)
+					if p.ExtConfig.KubeProxyReplacement {
+						if err := deleteHostPort(p, txn, obj); err != nil {
+							p.Log.Error("BUG: Unexpected failure in deleteHostPort",
+								logfields.Error, err)
+						}
 					}
 				case slim_corev1.PodRunning:
+					var err error
+
 					if obj.ObjectMeta.DeletionTimestamp != nil {
 						// The pod has been marked for deletion. Stop processing HostPort changes
 						// for it.
 						continue
 					}
 
-					err := upsertHostPort(p.HaveNetNSCookieSupport, p.ExtConfig, p.Log, txn, p.Writer, obj)
+					if p.ExtConfig.KubeProxyReplacement {
+						err = upsertHostPort(p.HaveNetNSCookieSupport, p.Config, p.ExtConfig, p.Log, txn, p.Writer, obj)
+					}
 					rh.update(podName, err)
 				}
 			}
@@ -201,10 +239,23 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 			initServices(txn)
 
 		case resource.Upsert:
-			svc, fes := convertService(p.ExtConfig, p.Log, obj)
+			svc, fes := convertService(p.Config, p.ExtConfig, p.Log, p.LocalNodeStore, obj, source.Kubernetes)
 			if svc == nil {
+				// The service should not be provisioned on this agent. Try to delete if it was previously.
+				name := loadbalancer.NewServiceName(obj.Namespace, obj.Name)
+				rh.update("svc:"+name.String(), nil)
+
+				oldSvc, err := p.Writer.DeleteServiceAndFrontends(txn, name)
+				if err != nil && !errors.Is(err, statedb.ErrObjectNotFound) {
+					p.Log.Error("BUG: Unexpected failure in DeleteServiceAndFrontends",
+						logfields.Error, err)
+				}
+				if oldSvc != nil {
+					p.SVCMetrics.DelService(oldSvc)
+				}
 				return
 			}
+			p.SVCMetrics.AddService(svc)
 
 			// Sort the frontends by address
 			slices.SortStableFunc(fes, func(a, b loadbalancer.FrontendParams) int {
@@ -215,74 +266,95 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 			rh.update("svc:"+svc.Name.String(), err)
 
 		case resource.Delete:
-			name := loadbalancer.ServiceName{Namespace: obj.Namespace, Name: obj.Name}
+			name := loadbalancer.NewServiceName(obj.Namespace, obj.Name)
 			rh.update("svc:"+name.String(), nil)
 
-			err := p.Writer.DeleteServiceAndFrontends(txn, name)
+			svc, err := p.Writer.DeleteServiceAndFrontends(txn, name)
 			if err != nil && !errors.Is(err, statedb.ErrObjectNotFound) {
 				p.Log.Error("BUG: Unexpected failure in DeleteServiceAndFrontends",
 					logfields.Error, err)
 			}
+			if svc != nil {
+				p.SVCMetrics.DelService(svc)
+			}
 		}
 	}
 
-	currentBackends := map[string]sets.Set[loadbalancer.L3n4Addr]{}
-	processEndpointsEvent := func(txn writer.WriteTxn, kind resource.EventKind, obj *k8s.Endpoints) {
+	currentEndpoints := map[string]endpointsEvent{}
+	processEndpointsEvent := func(txn writer.WriteTxn, key bufferKey, kind resource.EventKind, allEps allEndpoints) {
 		switch kind {
 		case resource.Sync:
 			initEndpoints(txn)
 
 		case resource.Upsert:
-			name, backends := convertEndpoints(p.ExtConfig, obj)
+			name := loadbalancer.NewServiceName(
+				key.key.Namespace,
+				key.key.Name,
+			)
+			var err error
 
-			if len(backends) > 0 {
-				err := p.Writer.UpsertBackends(
-					txn,
-					name,
-					source.Kubernetes,
-					backends...)
+			// Convert [k8s.Endpoints] to [loadbalancer.BackendParams]
+			backends := convertEndpoints(p.Log, p.ExtConfig, name, allEps.Backends())
 
-				rh.update("eps:"+obj.EndpointSliceName, err)
+			// Find orphaned backends. We are using iter.Seq to avoid unnecessary allocations.
+			var orphans iter.Seq[loadbalancer.L3n4Addr] = func(yield func(loadbalancer.L3n4Addr) bool) {
+				for ep := range allEps.All() {
+					previous, found := currentEndpoints[ep.name]
+					if !found {
+						continue
+					}
+					for addr, prevBe := range previous.backends {
+						be, foundBe := ep.backends[addr]
+						for l4Addr := range prevBe.Ports {
+							foundPort := false
+							if foundBe {
+								_, foundPort = be.Ports[l4Addr]
+							}
+							if !foundPort {
+								if !yield(
+									loadbalancer.NewL3n4Addr(
+										l4Addr.Protocol,
+										addr,
+										l4Addr.Port,
+										loadbalancer.ScopeExternal,
+									)) {
+									return
+								}
+							}
+						}
+					}
+				}
 			}
 
-			// Release orphaned backends
-			newAddrs := sets.New[loadbalancer.L3n4Addr]()
-			for _, be := range backends {
-				newAddrs.Insert(be.Address)
+			err = p.Writer.UpsertAndReleaseBackends(txn, name, source.Kubernetes, backends, orphans)
+
+			for ep := range allEps.All() {
+				if len(ep.backends) == 0 {
+					delete(currentEndpoints, ep.name)
+				} else {
+					currentEndpoints[ep.name] = ep
+				}
 			}
-			old := currentBackends[obj.EndpointSliceName]
-			p.Writer.ReleaseBackends(txn, name, old.Difference(newAddrs).UnsortedList()...)
-			currentBackends[obj.EndpointSliceName] = newAddrs
+
+			rh.update("eps:"+name.String(), err)
 
 		case resource.Delete:
-			rh.update("eps:"+obj.EndpointSliceName, nil)
-			// Release the backends created before.
-			name := loadbalancer.ServiceName{
-				Name:      obj.ServiceID.Name,
-				Namespace: obj.ServiceID.Namespace,
-			}
-			p.Writer.ReleaseBackends(txn, name,
-				currentBackends[obj.EndpointSliceName].UnsortedList()...)
+			// [bufferInsert] will only emit Sync and Upsert for the merged endpoints.
+			panic("BUG: unexpected Delete event")
 		}
+	}
+
+	// Use a pool for the buffers to avoid reallocs.
+	bufferPool := sync.Pool{
+		New: func() any {
+			return container.NewInsertOrderedMap[bufferKey, bufferValue]()
+		},
 	}
 
 	// Combine services and endpoint events into a single buffer.
 	// Use InsertOrderedMap to retain relative ordering of events with different keys.
 	// This highly increases the probability that related services and endpoints are committed
-	// in the same transaction, thus reducing overall processing costs.
-	type bufferKey struct {
-		key   resource.Key
-		isSvc bool
-	}
-	type buffer = *container.InsertOrderedMap[bufferKey, resource.Event[runtime.Object]]
-
-	// Use a pool for the buffers to avoid reallocs.
-	bufferPool := sync.Pool{
-		New: func() any {
-			return container.NewInsertOrderedMap[bufferKey, resource.Event[runtime.Object]]()
-		},
-	}
-
+	// in the same transaction and thus reconciled together and reducing overall processing costs.
 	events := stream.ToChannel(ctx,
 		stream.Buffer(
 			joinObservables(
@@ -295,10 +367,7 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 				if buf == nil {
 					buf = bufferPool.Get().(buffer)
 				}
-				ev.Done(nil)
-				_, isSvc := ev.Object.(*slim_corev1.Service)
-				buf.Insert(bufferKey{key: ev.Key, isSvc: isSvc}, ev)
-				return buf
+				return bufferInsert(buf, ev)
 			},
 		),
 	)
@@ -306,14 +375,11 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 	processBuffer := func(buf buffer) {
 		txn := p.Writer.WriteTxn()
 		defer txn.Commit()
-		for _, ev := range buf.All() {
-			switch obj := ev.Object.(type) {
-			case *slim_corev1.Service:
-				processServiceEvent(txn, ev.Kind, obj)
-			case *k8s.Endpoints:
-				processEndpointsEvent(txn, ev.Kind, obj)
-			default:
-				panic(fmt.Sprintf("BUG: unhandled object type %T", obj))
+		for key, val := range buf.All() {
+			if key.isSvc {
+				processServiceEvent(txn, val.kind, val.svc)
+			} else {
+				processEndpointsEvent(txn, key, val.kind, val.allEndpoints)
 			}
 		}
 	}
@@ -325,6 +391,112 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 		rh.report()
 	}
 	return nil
+}
+
+type bufferKey struct {
+	key   resource.Key
+	isSvc bool
+}
+
+type bufferValue struct {
+	kind         resource.EventKind
+	svc          *slim_corev1.Service
+	allEndpoints allEndpoints
+}
+
+type endpointsEvent struct {
+	name     string
+	backends map[cmtypes.AddrCluster]*k8s.Backend
+}
+
+// allEndpoints holds one or more [k8s.Endpoints] that target the same service within a single buffer.
+// This type is designed to avoid allocations for the usual case of single endpoint slice per service.
+type allEndpoints struct {
+	head endpointsEvent
+	tail []endpointsEvent
+}
+
+func (ae allEndpoints) insert(deleted bool, ep *k8s.Endpoints) allEndpoints {
+	ev := endpointsEvent{
+		name: ep.EndpointSliceName,
+	}
+	if !deleted {
+		ev.backends = ep.Backends
+	}
+
+	if ae.head.name == "" || ae.head.name == ev.name {
+		ae.head = ev
+		return ae
+	}
+	for i, x := range ae.tail {
+		if ev.name == x.name {
+			ae.tail[i] = ev
+			return ae
+		}
+	}
+	ae.tail = append(ae.tail, ev)
+	return ae
+}
+
+func (ae *allEndpoints) All() iter.Seq[endpointsEvent] {
+	return func(yield func(endpointsEvent) bool) {
+		if ae.head.name != "" {
+			if !yield(ae.head) {
+				return
+			}
+		}
+		for _, ep := range ae.tail {
+			if !yield(ep) {
+				return
+			}
+		}
+	}
+}
+
+func (ae *allEndpoints) Backends() iter.Seq2[cmtypes.AddrCluster, *k8s.Backend] {
+	return func(yield func(cmtypes.AddrCluster, *k8s.Backend) bool) {
+		for ep := range ae.All() {
+			for addr, be := range ep.backends {
+				if !yield(addr, be) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// buffer for holding a batch of service or endpoint events
+type buffer = *container.InsertOrderedMap[bufferKey, bufferValue]
+
+func bufferInsert(buf buffer, ev resource.Event[runtime.Object]) buffer {
+	switch obj := ev.Object.(type) {
+	case *k8s.Endpoints:
+		if ev.Kind == resource.Sync {
+			buf.Insert(bufferKey{isSvc: false}, bufferValue{kind: ev.Kind})
+			return buf
+		}
+		key := bufferKey{
+			resource.Key{Name: obj.ServiceName.Name(), Namespace: obj.ServiceName.Namespace()},
+			false,
+		}
+		var allEps allEndpoints
+		if old, ok := buf.Get(key); ok {
+			allEps = old.allEndpoints
+		}
+		allEps = allEps.insert(ev.Kind == resource.Delete, obj)
+
+		// Since we may merge a mixture of Upsert and Delete events together we handle
+		// deletion as an Upsert of [endpointsEvent] with nil backends.
+		buf.Insert(key, bufferValue{
+			kind:         resource.Upsert,
+			allEndpoints: allEps,
+		})
+	case *slim_corev1.Service:
+		buf.Insert(bufferKey{key: ev.Key, isSvc: true}, bufferValue{kind: ev.Kind, svc: obj})
+	default:
+		panic(fmt.Sprintf("BUG: unhandled type %T", obj))
+	}
+	return buf
 }
 
 type reflectorHealth struct {
@@ -370,364 +542,18 @@ func (rh *reflectorHealth) report() {
 	rh.prevError = processingError
 }
 
-var (
-	zeroV4 = cmtypes.MustParseAddrCluster("0.0.0.0")
-	zeroV6 = cmtypes.MustParseAddrCluster("::")
-
-	ingressDummyAddress = cmtypes.MustParseAddrCluster("192.192.192.192")
-	ingressDummyPort    = uint16(9999)
-)
-
-func isIngressDummyEndpoint(l3n4Addr loadbalancer.L3n4Addr) bool {
-	// The ingress and gateway-api controllers (operator/pkg/model/translation/{gateway-api,ingress}) create
-	// a dummy endpoint to force Cilium to reconcile the service. This is no longer required with this new
-	// control-plane, but due to rolling upgrades we cannot remove it immediately. Hence we have the
-	// special handlind here to just ignore this endpoint to avoid populating the tables with unnecessary
-	// data.
-	return l3n4Addr.AddrCluster.Equal(ingressDummyAddress) && l3n4Addr.Port == ingressDummyPort
-}
-
-func isHeadless(svc *slim_corev1.Service) bool {
-	_, headless := svc.Labels[corev1.IsHeadlessService]
-	if strings.ToLower(svc.Spec.ClusterIP) == "none" {
-		headless = true
-	}
-	return headless
-}
-
-func convertService(cfg loadbalancer.ExternalConfig, log *slog.Logger, svc *slim_corev1.Service) (s *loadbalancer.Service, fes []loadbalancer.FrontendParams) {
-	name := loadbalancer.ServiceName{Namespace: svc.Namespace, Name: svc.Name}
-	s = &loadbalancer.Service{
-		Name:                name,
-		Source:              source.Kubernetes,
-		Labels:              labels.Map2Labels(svc.Labels, string(source.Kubernetes)),
-		Selector:            svc.Spec.Selector,
-		Annotations:         svc.Annotations,
-		HealthCheckNodePort: uint16(svc.Spec.HealthCheckNodePort),
-	}
-
-	expType, err := k8s.NewSvcExposureType(svc)
-	if err != nil {
-		log.Warn("Ignoring annotation",
-			logfields.Error, err,
-			logfields.Annotations, annotation.ServiceTypeExposure,
-			logfields.Service, svc.GetName(),
-		)
-	}
-
-	if len(svc.Spec.Ports) > 0 {
-		s.PortNames = map[string]uint16{}
-		for _, port := range svc.Spec.Ports {
-			s.PortNames[port.Name] = uint16(port.Port)
-		}
-	}
-
-	for _, srcRange := range svc.Spec.LoadBalancerSourceRanges {
-		cidr, err := cidr.ParseCIDR(srcRange)
-		if err != nil {
-			continue
-		}
-		s.SourceRanges = append(s.SourceRanges, *cidr)
-	}
-
-	switch svc.Spec.ExternalTrafficPolicy {
-	case slim_corev1.ServiceExternalTrafficPolicyLocal:
-		s.ExtTrafficPolicy = loadbalancer.SVCTrafficPolicyLocal
-	default:
-		s.ExtTrafficPolicy = loadbalancer.SVCTrafficPolicyCluster
-	}
-
-	if svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == slim_corev1.ServiceInternalTrafficPolicyLocal {
-		s.IntTrafficPolicy = loadbalancer.SVCTrafficPolicyLocal
-	} else {
-		s.IntTrafficPolicy = loadbalancer.SVCTrafficPolicyCluster
-	}
-	// Scopes for NodePort and LoadBalancer. Either just external (policies are the same), or
-	// both external and internal (when one policy is local)
-	scopes := []uint8{loadbalancer.ScopeExternal}
-	twoScopes := (s.ExtTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal) != (s.IntTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal)
-	if twoScopes {
-		scopes = append(scopes, loadbalancer.ScopeInternal)
-	}
-
-	// SessionAffinity
-	if svc.Spec.SessionAffinity == slim_corev1.ServiceAffinityClientIP {
-		s.SessionAffinity = true
-
-		s.SessionAffinityTimeout = time.Duration(int(time.Second) * int(slim_corev1.DefaultClientIPServiceAffinitySeconds))
-		if cfg := svc.Spec.SessionAffinityConfig; cfg != nil && cfg.ClientIP != nil && cfg.ClientIP.TimeoutSeconds != nil && *cfg.ClientIP.TimeoutSeconds != 0 {
-			s.SessionAffinityTimeout = time.Duration(int(time.Second) * int(*cfg.ClientIP.TimeoutSeconds))
-		}
-	}
-
-	if s.IntTrafficPolicy != loadbalancer.SVCTrafficPolicyLocal && isTopologyAware(svc) {
-		s.TrafficDistribution = loadbalancer.TrafficDistributionPreferClose
-	}
-
-	// A service that is annotated as headless has no frontends, even if the service spec contains
-	// ClusterIPs etc.
-	if isHeadless(svc) {
-		return
-	}
-
-	// ClusterIP
-	if expType.CanExpose(slim_corev1.ServiceTypeClusterIP) {
-		var clusterIPs []string
-		if len(svc.Spec.ClusterIPs) > 0 {
-			clusterIPs = slices.Sorted(slices.Values(svc.Spec.ClusterIPs))
-		} else {
-			clusterIPs = []string{svc.Spec.ClusterIP}
-		}
-
-		for _, ip := range clusterIPs {
-			addr, err := cmtypes.ParseAddrCluster(ip)
-			if err != nil {
-				continue
-			}
-
-			if (!cfg.EnableIPv6 && addr.Is6()) || (!cfg.EnableIPv4 && addr.Is4()) {
-				continue
-			}
-
-			for _, port := range svc.Spec.Ports {
-				p := loadbalancer.NewL4Addr(loadbalancer.L4Type(port.Protocol), uint16(port.Port))
-				if p == nil {
-					continue
-				}
-				fe := loadbalancer.FrontendParams{
-					Type:        loadbalancer.SVCTypeClusterIP,
-					PortName:    loadbalancer.FEPortName(port.Name),
-					ServiceName: name,
-					ServicePort: uint16(port.Port),
-				}
-				fe.Address.AddrCluster = addr
-				fe.Address.Scope = loadbalancer.ScopeExternal
-				fe.Address.L4Addr = *p
-				fes = append(fes, fe)
-			}
-		}
-	}
-
-	// NOTE: We always want to do ClusterIP services even when full kube-proxy replacement is disabled.
-	// See https://github.com/cilium/cilium/issues/16197 for context.
-
-	if cfg.KubeProxyReplacement {
-		// NodePort
-		if (svc.Spec.Type == slim_corev1.ServiceTypeNodePort || svc.Spec.Type == slim_corev1.ServiceTypeLoadBalancer) &&
-			expType.CanExpose(slim_corev1.ServiceTypeNodePort) {
-
-			for _, scope := range scopes {
-				for _, family := range getIPFamilies(svc) {
-					if (!cfg.EnableIPv6 && family == slim_corev1.IPv6Protocol) ||
-						(!cfg.EnableIPv4 && family == slim_corev1.IPv4Protocol) {
-						continue
-					}
-					for _, port := range svc.Spec.Ports {
-						if port.NodePort == 0 {
-							continue
-						}
-
-						fe := loadbalancer.FrontendParams{
-							Type:        loadbalancer.SVCTypeNodePort,
-							PortName:    loadbalancer.FEPortName(port.Name),
-							ServiceName: name,
-							ServicePort: uint16(port.Port),
-						}
-
-						switch family {
-						case slim_corev1.IPv4Protocol:
-							fe.Address.AddrCluster = zeroV4
-						case slim_corev1.IPv6Protocol:
-							fe.Address.AddrCluster = zeroV6
-						default:
-							continue
-						}
-
-						p := loadbalancer.NewL4Addr(loadbalancer.L4Type(port.Protocol), uint16(port.NodePort))
-						if p == nil {
-							continue
-						}
-						fe.Address.Scope = scope
-						fe.Address.L4Addr = *p
-						fes = append(fes, fe)
-					}
-				}
-			}
-		}
-
-		// LoadBalancer
-		if svc.Spec.Type == slim_corev1.ServiceTypeLoadBalancer && expType.CanExpose(slim_corev1.ServiceTypeLoadBalancer) {
-			for _, ip := range svc.Status.LoadBalancer.Ingress {
-				if ip.IP == "" {
-					continue
-				}
-
-				addr, err := cmtypes.ParseAddrCluster(ip.IP)
-				if err != nil {
-					continue
-				}
-				if (!cfg.EnableIPv6 && addr.Is6()) || (!cfg.EnableIPv4 && addr.Is4()) {
-					continue
-				}
-
-				for _, scope := range scopes {
-					for _, port := range svc.Spec.Ports {
-						fe := loadbalancer.FrontendParams{
-							Type:        loadbalancer.SVCTypeLoadBalancer,
-							PortName:    loadbalancer.FEPortName(port.Name),
-							ServiceName: name,
-							ServicePort: uint16(port.Port),
-						}
-
-						p := loadbalancer.NewL4Addr(loadbalancer.L4Type(port.Protocol), uint16(port.Port))
-						if p == nil {
-							continue
-						}
-						fe.Address.AddrCluster = addr
-						fe.Address.Scope = scope
-						fe.Address.L4Addr = *p
-						fes = append(fes, fe)
-					}
-				}
-
-			}
-		}
-
-		// ExternalIP
-		for _, ip := range svc.Spec.ExternalIPs {
-			addr, err := cmtypes.ParseAddrCluster(ip)
-			if err != nil {
-				continue
-			}
-			if (!cfg.EnableIPv6 && addr.Is6()) || (!cfg.EnableIPv4 && addr.Is4()) {
-				continue
-			}
-
-			for _, port := range svc.Spec.Ports {
-				fe := loadbalancer.FrontendParams{
-					Type:        loadbalancer.SVCTypeExternalIPs,
-					PortName:    loadbalancer.FEPortName(port.Name),
-					ServiceName: name,
-					ServicePort: uint16(port.Port),
-				}
-
-				p := loadbalancer.NewL4Addr(loadbalancer.L4Type(port.Protocol), uint16(port.Port))
-				if p == nil {
-					continue
-				}
-
-				fe.Address.AddrCluster = addr
-				fe.Address.Scope = loadbalancer.ScopeExternal
-				fe.Address.L4Addr = *p
-				fes = append(fes, fe)
-			}
-		}
-	}
-
-	return
-}
-
-func getIPFamilies(svc *slim_corev1.Service) []slim_corev1.IPFamily {
-	if len(svc.Spec.IPFamilies) == 0 {
-		// No IP families specified, try to deduce them from the cluster IPs
-		if len(svc.Spec.ClusterIP) == 0 || svc.Spec.ClusterIP == slim_corev1.ClusterIPNone {
-			return nil
-		}
-
-		ipv4, ipv6 := false, false
-		if len(svc.Spec.ClusterIPs) > 0 {
-			for _, cip := range svc.Spec.ClusterIPs {
-				if ip.IsIPv6(net.ParseIP(cip)) {
-					ipv6 = true
-				} else {
-					ipv4 = true
-				}
-			}
-		} else {
-			ipv6 = ip.IsIPv6(net.ParseIP(svc.Spec.ClusterIP))
-			ipv4 = !ipv6
-		}
-		families := make([]slim_corev1.IPFamily, 0, 2)
-		if ipv4 {
-			families = append(families, slim_corev1.IPv4Protocol)
-		}
-		if ipv6 {
-			families = append(families, slim_corev1.IPv4Protocol)
-		}
-		return families
-	}
-	return svc.Spec.IPFamilies
-}
-
-func convertEndpoints(cfg loadbalancer.ExternalConfig, ep *k8s.Endpoints) (name loadbalancer.ServiceName, out []loadbalancer.BackendParams) {
-	name = loadbalancer.ServiceName{
-		Name:      ep.ServiceID.Name,
-		Namespace: ep.ServiceID.Namespace,
-	}
-
-	// k8s.Endpoints may have the same backend address multiple times
-	// with a different port name. Collapse them down into single
-	// entry.
-	type entry struct {
-		portNames []string
-		backend   *k8s.Backend
-	}
-	entries := map[loadbalancer.L3n4Addr]entry{}
-
-	for addrCluster, be := range ep.Backends {
-		if (!cfg.EnableIPv6 && addrCluster.Is6()) || (!cfg.EnableIPv4 && addrCluster.Is4()) {
-			continue
-		}
-		for portName, l4Addr := range be.Ports {
-			l3n4Addr := loadbalancer.L3n4Addr{
-				AddrCluster: addrCluster,
-				L4Addr:      *l4Addr,
-			}
-			if isIngressDummyEndpoint(l3n4Addr) {
-				continue
-			}
-			portNames := entries[l3n4Addr].portNames
-			if portName != "" {
-				portNames = append(portNames, portName)
-			}
-			entries[l3n4Addr] = entry{
-				portNames: portNames,
-				backend:   be,
-			}
-		}
-	}
-	for l3n4Addr, entry := range entries {
-
-		state := loadbalancer.BackendStateActive
-		if entry.backend.Terminating {
-			state = loadbalancer.BackendStateTerminating
-		}
-		be := loadbalancer.BackendParams{
-			Address:   l3n4Addr,
-			NodeName:  entry.backend.NodeName,
-			PortNames: entry.portNames,
-			Weight:    loadbalancer.DefaultBackendWeight,
-			Zone:      entry.backend.Zone,
-			ForZones:  entry.backend.HintsForZones,
-			State:     state,
-		}
-		out = append(out, be)
-	}
-	return
-}
-
 // hostPortServiceNamePrefix returns the common prefix for synthetic HostPort services
 // for the pod with the given name. This prefix is used as-is when cleaning up existing
 // HostPort entries for a pod. This handles the pod recreation where name stays but UID
 // changes, which we might see only as an update without any deletion.
 func hostPortServiceNamePrefix(pod *slim_corev1.Pod) loadbalancer.ServiceName {
-	return loadbalancer.ServiceName{
-		Name:      fmt.Sprintf("%s:host-port:", pod.ObjectMeta.Name),
-		Namespace: pod.ObjectMeta.Namespace,
-	}
+	return loadbalancer.NewServiceName(
+		pod.ObjectMeta.Namespace,
+		fmt.Sprintf("%s:host-port:", pod.ObjectMeta.Name),
+	)
 }
 
-func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, extConfig loadbalancer.ExternalConfig, log *slog.Logger, wtxn writer.WriteTxn, writer *writer.Writer, pod *slim_corev1.Pod) error {
+func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, config loadbalancer.Config, extConfig loadbalancer.ExternalConfig, log *slog.Logger, wtxn writer.WriteTxn, writer *writer.Writer, pod *slim_corev1.Pod) error {
 	podIPs := k8sUtils.ValidIPs(pod.Status)
 	containers := slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers)
 	serviceNamePrefix := hostPortServiceNamePrefix(pod)
@@ -739,12 +565,12 @@ func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, extConfig loadbal
 				continue
 			}
 
-			if uint16(p.HostPort) >= extConfig.NodePortMin &&
-				uint16(p.HostPort) <= extConfig.NodePortMax {
+			if uint16(p.HostPort) >= config.NodePortMin &&
+				uint16(p.HostPort) <= config.NodePortMax {
 				log.Warn("The requested hostPort is colliding with the configured NodePort range. Ignoring.",
 					logfields.HostPort, p.HostPort,
-					logfields.NodePortMin, extConfig.NodePortMin,
-					logfields.NodePortMax, extConfig.NodePortMax,
+					logfields.NodePortMin, config.NodePortMin,
+					logfields.NodePortMax, config.NodePortMax,
 				)
 				continue
 			}
@@ -756,10 +582,11 @@ func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, extConfig loadbal
 
 			// HostPort service names are of form:
 			// <namespace>/<name>:host-port:<port>:<uid>.
-			serviceName := serviceNamePrefix
-			serviceName.Name += fmt.Sprintf("%d:%s",
-				p.HostPort,
-				pod.ObjectMeta.UID)
+			serviceName := serviceNamePrefix.AppendSuffix(
+				fmt.Sprintf("%d:%s",
+					p.HostPort,
+					pod.ObjectMeta.UID),
+			)
 
 			var ipv4, ipv6 bool
 
@@ -778,13 +605,12 @@ func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, extConfig loadbal
 				ipv6 = ipv6 || addr.Is6()
 
 				bep := loadbalancer.BackendParams{
-					Address: loadbalancer.L3n4Addr{
-						AddrCluster: addr,
-						L4Addr: loadbalancer.L4Addr{
-							Protocol: proto,
-							Port:     uint16(p.ContainerPort),
-						},
-					},
+					Address: loadbalancer.NewL3n4Addr(
+						proto,
+						addr,
+						uint16(p.ContainerPort),
+						loadbalancer.ScopeExternal,
+					),
 					Weight: loadbalancer.DefaultBackendWeight,
 				}
 				bes = append(bes, bep)
@@ -834,14 +660,12 @@ func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, extConfig loadbal
 				fe := loadbalancer.FrontendParams{
 					Type:        loadbalancer.SVCTypeHostPort,
 					ServiceName: serviceName,
-					Address: loadbalancer.L3n4Addr{
-						AddrCluster: addr,
-						L4Addr: loadbalancer.L4Addr{
-							Protocol: proto,
-							Port:     uint16(p.HostPort),
-						},
-						Scope: loadbalancer.ScopeExternal,
-					},
+					Address: loadbalancer.NewL3n4Addr(
+						proto,
+						addr,
+						uint16(p.HostPort),
+						loadbalancer.ScopeExternal,
+					),
 					ServicePort: uint16(p.HostPort),
 				}
 				fes = append(fes, fe)
@@ -879,7 +703,7 @@ func upsertHostPort(netnsCookie lbmaps.HaveNetNSCookieSupport, extConfig loadbal
 			return fmt.Errorf("DeleteBackendsOfService: %w", err)
 		}
 
-		err = writer.DeleteServiceAndFrontends(wtxn, svc.Name)
+		_, err = writer.DeleteServiceAndFrontends(wtxn, svc.Name)
 		if err != nil {
 			return fmt.Errorf("DeleteServiceAndFrontends: %w", err)
 		}
@@ -895,7 +719,7 @@ func deleteHostPort(params reflectorParams, wtxn writer.WriteTxn, pod *slim_core
 		if err != nil {
 			return fmt.Errorf("DeleteBackendsOfService: %w", err)
 		}
-		err = params.Writer.DeleteServiceAndFrontends(wtxn, svc.Name)
+		_, err = params.Writer.DeleteServiceAndFrontends(wtxn, svc.Name)
 		if err != nil {
 			return fmt.Errorf("DeleteServiceAndFrontends: %w", err)
 		}
@@ -905,6 +729,9 @@ func deleteHostPort(params reflectorParams, wtxn writer.WriteTxn, pod *slim_core
 
 func toObjectObservable[T runtime.Object](src stream.Observable[resource.Event[T]]) stream.Observable[resource.Event[runtime.Object]] {
 	return stream.Map(src, func(ev resource.Event[T]) resource.Event[runtime.Object] {
+		// Already mark the event as handled as we don't need retries.
+		ev.Done(nil)
+
 		return resource.Event[runtime.Object]{
 			Kind:   ev.Kind,
 			Key:    ev.Key,
@@ -917,21 +744,24 @@ func toObjectObservable[T runtime.Object](src stream.Observable[resource.Event[T
 func joinObservables[T any](src stream.Observable[T], srcs ...stream.Observable[T]) stream.Observable[T] {
 	return stream.FuncObservable[T](
 		func(ctx context.Context, next func(T), complete func(error)) {
-			var mu lock.Mutex // Use a mutex to serialize the 'next' callbacks
-			completed := false
+			// Use a mutex to serialize the 'next' callbacks
+			var mu lock.Mutex
+
+			remainingCompletions := len(srcs)
 			emit := func(x T) {
 				mu.Lock()
 				defer mu.Unlock()
-				if !completed {
+				if remainingCompletions > 0 {
 					next(x)
 				}
 			}
+
 			comp := func(err error) {
 				mu.Lock()
 				defer mu.Unlock()
-				if !completed {
+				remainingCompletions--
+				if remainingCompletions == 0 {
 					complete(err)
-					completed = true
 				}
 			}
 			src.Observe(ctx, emit, comp)
@@ -939,19 +769,4 @@ func joinObservables[T any](src stream.Observable[T], srcs ...stream.Observable[
 				src.Observe(ctx, emit, comp)
 			}
 		})
-}
-
-func isTopologyAware(svc *slim_corev1.Service) bool {
-	return getAnnotationTopologyAwareHints(svc) ||
-		(svc.Spec.TrafficDistribution != nil &&
-			*svc.Spec.TrafficDistribution == corev1.ServiceTrafficDistributionPreferClose)
-}
-
-func getAnnotationTopologyAwareHints(svc *slim_corev1.Service) bool {
-	// v1.DeprecatedAnnotationTopologyAwareHints has precedence over v1.AnnotationTopologyMode.
-	value, ok := svc.ObjectMeta.Annotations[corev1.DeprecatedAnnotationTopologyAwareHints]
-	if !ok {
-		value = svc.ObjectMeta.Annotations[corev1.AnnotationTopologyMode]
-	}
-	return !(value == "" || value == "disabled" || value == "Disabled")
 }

@@ -5,6 +5,7 @@ package creator
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/cilium/hive/cell"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/proxy"
 	"github.com/cilium/cilium/pkg/time"
+	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 var launchTime = 30 * time.Second
@@ -42,6 +44,7 @@ type EndpointCreator interface {
 }
 
 type endpointCreator struct {
+	logger           *slog.Logger
 	endpointManager  endpointmanager.EndpointManager
 	dnsRulesAPI      fqdnrules.DNSRulesService
 	epBuildQueue     endpoint.EndpointBuildQueue
@@ -61,6 +64,7 @@ type endpointCreator struct {
 	// kvstoreSyncher updates the kvstore (e.g., etcd) with up-to-date
 	// information about endpoints.
 	kvstoreSyncher *ipcache.IPIdentitySynchronizer
+	wgConfig       wgTypes.WireguardConfig
 }
 
 var _ EndpointCreator = &endpointCreator{}
@@ -68,6 +72,7 @@ var _ EndpointCreator = &endpointCreator{}
 type endpointManagerParams struct {
 	cell.In
 
+	Logger              *slog.Logger
 	EndpointManager     endpointmanager.EndpointManager
 	DNSRulesService     fqdnrules.DNSRulesService
 	EPBuildQueue        endpoint.EndpointBuildQueue
@@ -85,10 +90,12 @@ type endpointManagerParams struct {
 	Allocator           cache.IdentityAllocator
 	CTMapGC             ctmap.GCRunner
 	KVStoreSynchronizer *ipcache.IPIdentitySynchronizer
+	WgConfig            wgTypes.WireguardConfig
 }
 
 func newEndpointCreator(p endpointManagerParams) EndpointCreator {
 	return &endpointCreator{
+		logger:           p.Logger,
 		endpointManager:  p.EndpointManager,
 		dnsRulesAPI:      p.DNSRulesService,
 		epBuildQueue:     p.EPBuildQueue,
@@ -106,12 +113,14 @@ func newEndpointCreator(p endpointManagerParams) EndpointCreator {
 		allocator:        p.Allocator,
 		ctMapGC:          p.CTMapGC,
 		kvstoreSyncher:   p.KVStoreSynchronizer,
+		wgConfig:         p.WgConfig,
 	}
 }
 
 func (c *endpointCreator) NewEndpointFromChangeModel(ctx context.Context, base *models.EndpointChangeRequest) (*endpoint.Endpoint, error) {
 	return endpoint.NewEndpointFromChangeModel(
 		ctx,
+		c.logger,
 		c.dnsRulesAPI,
 		c.epBuildQueue,
 		c.loader,
@@ -129,11 +138,13 @@ func (c *endpointCreator) NewEndpointFromChangeModel(ctx context.Context, base *
 		c.ctMapGC,
 		c.kvstoreSyncher,
 		base,
+		c.wgConfig,
 	)
 }
 
 func (c *endpointCreator) ParseEndpoint(epJSON []byte) (*endpoint.Endpoint, error) {
 	return endpoint.ParseEndpoint(
+		c.logger,
 		c.dnsRulesAPI,
 		c.epBuildQueue,
 		c.loader,
@@ -151,11 +162,13 @@ func (c *endpointCreator) ParseEndpoint(epJSON []byte) (*endpoint.Endpoint, erro
 		c.ctMapGC,
 		c.kvstoreSyncher,
 		epJSON,
+		c.wgConfig,
 	)
 }
 
 func (c *endpointCreator) AddIngressEndpoint(ctx context.Context) error {
 	ep, err := endpoint.CreateIngressEndpoint(
+		c.logger,
 		c.dnsRulesAPI,
 		c.epBuildQueue,
 		c.loader,
@@ -172,6 +185,7 @@ func (c *endpointCreator) AddIngressEndpoint(ctx context.Context) error {
 		c.allocator,
 		c.ctMapGC,
 		c.kvstoreSyncher,
+		c.wgConfig,
 	)
 	if err != nil {
 		return err
@@ -188,6 +202,7 @@ func (c *endpointCreator) AddIngressEndpoint(ctx context.Context) error {
 
 func (c *endpointCreator) AddHostEndpoint(ctx context.Context) error {
 	ep, err := endpoint.CreateHostEndpoint(
+		c.logger,
 		c.dnsRulesAPI,
 		c.epBuildQueue,
 		c.loader,
@@ -204,6 +219,7 @@ func (c *endpointCreator) AddHostEndpoint(ctx context.Context) error {
 		c.allocator,
 		c.ctMapGC,
 		c.kvstoreSyncher,
+		c.wgConfig,
 	)
 	if err != nil {
 		return err

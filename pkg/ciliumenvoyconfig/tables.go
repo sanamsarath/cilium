@@ -5,6 +5,7 @@ package ciliumenvoyconfig
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -30,6 +31,7 @@ type CEC struct {
 	Name k8sTypes.NamespacedName
 	Spec *ciliumv2.CiliumEnvoyConfigSpec
 
+	Labels           map[string]string
 	Selector         labels.Selector `json:"-" yaml:"-"`
 	SelectsLocalNode bool
 	Listeners        part.Map[string, uint16]
@@ -49,6 +51,7 @@ func (*CEC) TableHeader() []string {
 	return []string{
 		"Name",
 		"Selected",
+		"Labels",
 		"NodeSelector",
 		"Services",
 		"BackendServices",
@@ -57,7 +60,7 @@ func (*CEC) TableHeader() []string {
 }
 
 func (cec *CEC) TableRow() []string {
-	var services, beServices, listeners []string
+	var services, beServices, listeners, labels []string
 	for _, svcl := range cec.Spec.Services {
 		services = append(services, svcl.Namespace+"/"+svcl.Name)
 	}
@@ -67,9 +70,14 @@ func (cec *CEC) TableRow() []string {
 	for name, port := range cec.Listeners.All() {
 		listeners = append(listeners, fmt.Sprintf("%s:%d", name, port))
 	}
+	for k, v := range cec.Labels {
+		labels = append(labels, k+"="+v)
+	}
+	slices.Sort(labels)
 	return []string{
 		cec.Name.String(),
 		strconv.FormatBool(cec.SelectsLocalNode),
+		strings.Join(labels, ", "),
 		cec.Selector.String(),
 		strings.Join(services, ", "),
 		strings.Join(beServices, ", "),
@@ -100,12 +108,7 @@ var (
 		FromObject: func(obj *CEC) index.KeySet {
 			keys := make([]index.Key, len(obj.Spec.Services))
 			for i, svcl := range obj.Spec.Services {
-				keys[i] = index.String(
-					loadbalancer.ServiceName{
-						Namespace: svcl.Namespace,
-						Name:      svcl.Name,
-					}.String(),
-				)
+				keys[i] = loadbalancer.NewServiceName(svcl.Namespace, svcl.Name).Key()
 			}
 			return index.NewKeySet(keys...)
 		},
@@ -119,15 +122,12 @@ var (
 )
 
 func NewCECTable(db *statedb.DB) (statedb.RWTable[*CEC], error) {
-	tbl, err := statedb.NewTable(
+	return statedb.NewTable(
+		db,
 		CECTableName,
 		cecNameIndex,
 		cecServiceIndex,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return tbl, db.RegisterTable(tbl)
 }
 
 type EnvoyResourceOrigin string
@@ -195,11 +195,7 @@ type EnvoyResource struct {
 }
 
 func (r *EnvoyResource) ClusterServiceName() loadbalancer.ServiceName {
-	return loadbalancer.ServiceName{
-		Namespace: r.Name.Namespace,
-		Name:      r.Name.Name,
-		Cluster:   r.Name.Cluster,
-	}
+	return loadbalancer.NewServiceNameInCluster(r.Name.Cluster, r.Name.Namespace, r.Name.Name)
 }
 
 type clusterReference struct {
@@ -311,9 +307,9 @@ func (r *EnvoyResource) TableRow() []string {
 		r.showListeners(),
 		r.showEndpoints(),
 		r.showReferences(),
-		string(r.Status.Kind),
+		r.Status.Kind.String(),
 		duration.HumanDuration(time.Since(r.Status.UpdatedAt)),
-		r.Status.Error,
+		r.Status.GetError(),
 	}
 }
 
@@ -347,13 +343,10 @@ var (
 )
 
 func NewEnvoyResourcesTable(db *statedb.DB) (statedb.RWTable[*EnvoyResource], error) {
-	tbl, err := statedb.NewTable(
+	return statedb.NewTable(
+		db,
 		EnvoyResourcesTableName,
 		envoyResourceNameIndex,
 		envoyResourceOriginIndex,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return tbl, db.RegisterTable(tbl)
 }

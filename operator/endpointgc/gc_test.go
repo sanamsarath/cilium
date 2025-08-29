@@ -11,7 +11,6 @@ import (
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sTesting "k8s.io/client-go/testing"
@@ -19,20 +18,21 @@ import (
 	"github.com/cilium/cilium/operator/k8s"
 	"github.com/cilium/cilium/pkg/hive"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/testutils"
 )
 
 func TestRegisterController(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 	)
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		cell.Provide(func() SharedConfig {
 			return SharedConfig{
@@ -65,12 +65,12 @@ func TestRegisterController(t *testing.T) {
 }
 
 func TestRegisterControllerOnce(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 	)
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		cell.Provide(func() SharedConfig {
 			return SharedConfig{
@@ -103,12 +103,12 @@ func TestRegisterControllerOnce(t *testing.T) {
 }
 
 func TestRegisterControllerWithCRDDisabled(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 	)
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Provide(func() SharedConfig {

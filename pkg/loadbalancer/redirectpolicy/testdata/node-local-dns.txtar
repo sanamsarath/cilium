@@ -4,7 +4,6 @@
 
 # Start and wait for reflectors to catch up.
 hive start
-db/initialized
 
 # Add the kubedns service and endpoints
 k8s/add svc-kubedns.yaml eps-kubedns.yaml
@@ -86,6 +85,7 @@ BE: ID=6 ADDR=10.244.1.68:9153/TCP STATE=active
 REV: ID=1 ADDR=10.96.0.10:53
 REV: ID=2 ADDR=10.96.0.10:53
 REV: ID=3 ADDR=10.96.0.10:9153
+SVC: ID=0 ADDR=10.96.0.10:0/ANY SLOT=0 LBALG=undef AFFTimeout=0 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=0 LBALG=undef AFFTimeout=0 COUNT=2 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=1 BEID=1 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=2 BEID=2 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
@@ -105,6 +105,7 @@ BE: ID=9 ADDR=10.244.0.226:53/TCP STATE=active
 REV: ID=1 ADDR=10.96.0.10:53
 REV: ID=2 ADDR=10.96.0.10:53
 REV: ID=3 ADDR=10.96.0.10:9153
+SVC: ID=0 ADDR=10.96.0.10:0/ANY SLOT=0 LBALG=undef AFFTimeout=0 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=0 LBALG=undef AFFTimeout=0 COUNT=2 QCOUNT=0 FLAGS=LocalRedirect
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=1 BEID=7 COUNT=0 QCOUNT=0 FLAGS=LocalRedirect
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=2 BEID=9 COUNT=0 QCOUNT=0 FLAGS=LocalRedirect
@@ -124,6 +125,7 @@ BE: ID=6 ADDR=10.244.1.68:9153/TCP STATE=active
 REV: ID=1 ADDR=10.96.0.10:53
 REV: ID=2 ADDR=10.96.0.10:53
 REV: ID=3 ADDR=10.96.0.10:9153
+SVC: ID=0 ADDR=10.96.0.10:0/ANY SLOT=0 LBALG=undef AFFTimeout=0 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=0 LBALG=undef AFFTimeout=0 COUNT=2 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=1 BEID=13 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=1 ADDR=10.96.0.10:53/TCP SLOT=2 BEID=14 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
@@ -180,14 +182,14 @@ endpoints:
     ready: true
     serving: true
     terminating: false
-  nodeName: kind-worker
+  nodeName: testnode
 - addresses:
   - 10.244.1.51
   conditions:
     ready: true
     serving: true
     terminating: false
-  nodeName: kind-worker
+  nodeName: testnode
 kind: EndpointSlice
 metadata:
   labels:
@@ -255,7 +257,7 @@ spec:
     - containerPort: 9253
       name: metrics
       protocol: TCP
-  nodeName: kind-control-plane
+  nodeName: testnode
 status:
   conditions:
   - lastProbeTime: null
@@ -301,7 +303,7 @@ spec:
     - containerPort: 9253
       name: metrics
       protocol: TCP
-  nodeName: kind-control-plane
+  nodeName: testnode
 status:
   conditions:
   - lastProbeTime: null

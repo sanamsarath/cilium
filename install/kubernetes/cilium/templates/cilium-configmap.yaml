@@ -71,6 +71,10 @@
   {{- end }}
 {{- end -}}
 {{- $ipam := (coalesce .Values.ipam.mode $defaultIPAM) -}}
+{{- if .Values.eni.enabled }}
+  {{- $ipam = "eni" -}}
+{{- end }}
+
 {{- $bpfCtTcpMax := (coalesce .Values.bpf.ctTcpMax $defaultBpfCtTcpMax) -}}
 {{- $bpfCtAnyMax := (coalesce .Values.bpf.ctAnyMax $defaultBpfCtAnyMax) -}}
 {{- $stringValueKPR := (toString .Values.kubeProxyReplacement) -}}
@@ -391,7 +395,7 @@ data:
   bpf-events-default-burst-limit: {{ .Values.bpf.events.default.burstLimit | quote }}
 {{- end}}
 
-{{- if .Values.bpf.mapDynamicSizeRatio }}
+{{- if ne 0.0 ( .Values.bpf.mapDynamicSizeRatio | float64) }}
   # Specifies the ratio (0.0-1.0] of total system memory to use for dynamic
   # sizing of the TCP CT, non-TCP CT, NAT and policy BPF maps.
   bpf-map-dynamic-size-ratio: {{ .Values.bpf.mapDynamicSizeRatio | quote }}
@@ -456,6 +460,9 @@ data:
   # policy map (per endpoint)
   bpf-policy-map-max: "{{ .Values.bpf.policyMapMax | int }}"
 {{- end }}
+{{- if has (kindOf .Values.bpf.policyMapPressureMetricsThreshold) (list "int64" "float64") }}
+  bpf-policy-map-pressure-metrics-threshold: {{ .Values.bpf.policyMapPressureMetricsThreshold | quote }}
+{{- end }}
 {{- if hasKey .Values.bpf "policyStatsMapMax" }}
   # bpf-policy-stats-map-max specifies the maximum number of entries in global
   # policy stats map
@@ -505,7 +512,7 @@ data:
   cluster-name: {{ .Values.cluster.name | quote }}
 
 {{- if hasKey .Values.cluster "id" }}
-  # Unique ID of the cluster. Must be unique across all conneted clusters and
+  # Unique ID of the cluster. Must be unique across all connected clusters and
   # in the range of 1 and 255. Only relevant when building a mesh of clusters.
   cluster-id: "{{ .Values.cluster.id }}"
 {{- end }}
@@ -526,7 +533,7 @@ data:
   {{- end }}
 {{- end }}
 
-  routing-mode: {{ .Values.routingMode | default (ternary "native" "tunnel" .Values.gke.enabled) | quote }}
+  routing-mode: {{ .Values.routingMode | default (ternary "native" "tunnel" (or .Values.eni.enabled .Values.gke.enabled)) | quote }}
   tunnel-protocol: {{ .Values.tunnelProtocol | default "vxlan" | quote }}
 
 {{- if eq .Values.routingMode "native" }}
@@ -727,8 +734,12 @@ data:
 {{- end }}
 {{- end }}
 
-{{- if hasKey .Values "localRedirectPolicy" }}
-  enable-local-redirect-policy: {{ .Values.localRedirectPolicy | quote }}
+{{ if or .Values.localRedirectPolicies.enabled .Values.localRedirectPolicy }}
+  enable-local-redirect-policy: "true"
+{{- end }}
+
+{{- if .Values.localRedirectPolicies.addressMatcherCIDRs }}
+  lrp-address-matcher-cidrs: {{ .Values.localRedirectPolicies.addressMatcherCIDRs | join "," | quote }}
 {{- end }}
 
 {{- if .Values.ipv4NativeRoutingCIDR }}
@@ -759,17 +770,13 @@ data:
   devices: {{ join " " .Values.devices | quote }}
 {{- end }}
 
-{{- if .Values.enableRuntimeDeviceDetection }}
-  enable-runtime-device-detection: "true"
-{{- end }}
-
 {{- if .Values.forceDeviceDetection }}
   force-device-detection: "true"
 {{- end }}
 
   kube-proxy-replacement: {{ $kubeProxyReplacement | quote }}
 
-{{- if ne $kubeProxyReplacement "disabled" }}
+{{- if eq $kubeProxyReplacement "true" }}
   kube-proxy-replacement-healthz-bind-address: {{ default "" .Values.kubeProxyReplacementHealthzBindAddr | quote}}
 {{- end }}
 
@@ -788,18 +795,8 @@ data:
 {{- end }}
 {{- end }}
 
-{{- if hasKey .Values "hostPort" }}
-{{- if eq $kubeProxyReplacement "partial" }}
-  enable-host-port: {{ .Values.hostPort.enabled | quote }}
-{{- end }}
-{{- end }}
-{{- if hasKey .Values "externalIPs" }}
-{{- if eq $kubeProxyReplacement "partial" }}
-  enable-external-ips: {{ .Values.externalIPs.enabled | quote }}
-{{- end }}
-{{- end }}
 {{- if hasKey .Values "nodePort" }}
-{{- if or (eq $kubeProxyReplacement "partial") (eq $kubeProxyReplacement "false") }}
+{{- if eq $kubeProxyReplacement "false" }}
   enable-node-port: {{ .Values.nodePort.enabled | quote }}
 {{- end }}
 {{- if hasKey .Values.nodePort "range" }}
@@ -842,13 +839,6 @@ data:
   enable-service-topology: {{ .Values.loadBalancer.serviceTopology | quote }}
 # {{- end }}
 
-{{- if hasKey .Values.loadBalancer "experimental" }}
-  enable-experimental-lb: {{ .Values.loadBalancer.experimental | quote }}
-{{- end }}
-{{- if hasKey .Values.loadBalancer "protocolDifferentiation" }}
-  bpf-lb-proto-diff: {{ .Values.loadBalancer.protocolDifferentiation.enabled | quote }}
-{{- end }}
-
 {{- end }}
 {{- if hasKey .Values.maglev "tableSize" }}
   bpf-lb-maglev-table-size: {{ .Values.maglev.tableSize | quote}}
@@ -856,30 +846,27 @@ data:
 {{- if hasKey .Values.maglev "hashSeed" }}
   bpf-lb-maglev-hash-seed: {{ .Values.maglev.hashSeed | quote}}
 {{- end }}
-{{- if .Values.sessionAffinity }}
-  enable-session-affinity: {{ .Values.sessionAffinity | quote }}
-{{- end }}
-{{- if .Values.svcSourceRangeCheck }}
-  enable-svc-source-range-check: {{ .Values.svcSourceRangeCheck | quote }}
-{{- end }}
 
 {{- if hasKey .Values "l2NeighDiscovery" }}
 {{- if hasKey .Values.l2NeighDiscovery "enabled" }}
   enable-l2-neigh-discovery: {{ .Values.l2NeighDiscovery.enabled | quote }}
 {{- end }}
-  arping-refresh-period: {{ include "validateDuration" .Values.l2NeighDiscovery.refreshPeriod | quote }}
 {{- end }}
 
 {{- if .Values.pprof.enabled }}
   pprof: {{ .Values.pprof.enabled | quote }}
   pprof-address: {{ .Values.pprof.address | quote }}
   pprof-port: {{ .Values.pprof.port | quote }}
+  pprof-mutex-profile-fraction: {{ .Values.pprof.mutexProfileFraction | quote }}
+  pprof-block-profile-rate: {{ .Values.pprof.blockProfileRate | quote }}
 {{- end }}
 
 {{- if .Values.operator.pprof.enabled }}
   operator-pprof: {{ .Values.operator.pprof.enabled | quote }}
   operator-pprof-address: {{ .Values.operator.pprof.address | quote }}
   operator-pprof-port: {{ .Values.operator.pprof.port | quote }}
+  operator-pprof-mutex-profile-fraction: {{ .Values.operator.pprof.mutexProfileFraction | quote }}
+  operator-pprof-block-profile-rate: {{ .Values.operator.pprof.blockProfileRate | quote }}
 {{- end }}
 
 {{- if .Values.logSystemLoad }}
@@ -1080,7 +1067,7 @@ data:
   hubble-drop-events-interval: {{ .Values.hubble.dropEventEmitter.interval | quote }}
   hubble-drop-events-reasons: {{ .Values.hubble.dropEventEmitter.reasons | join " " | quote }}
 {{- end }}
-{{- if .Values.hubble.preferIpv6 }}
+{{- if or (eq .Values.hubble.preferIpv6 true) (eq .Values.ipv4.enabled false) }}
   hubble-prefer-ipv6: "true"
 {{- end }}
 {{- if (not (kindIs "invalid" .Values.hubble.skipUnknownCGroupIDs)) }}
@@ -1106,18 +1093,10 @@ data:
 
 {{- if (eq $ipam "cluster-pool") }}
 {{- if .Values.ipv4.enabled }}
-  {{- if hasKey .Values.ipam.operator "clusterPoolIPv4PodCIDR" }}
-    {{- /* ipam.operator.clusterPoolIPv4PodCIDR removed in v1.14, remove this failsafe around v1.17 */ -}}
-    {{- fail "Value ipam.operator.clusterPoolIPv4PodCIDR removed, use ipam.operator.clusterPoolIPv4PodCIDRList instead" }}
-  {{- end }}
   cluster-pool-ipv4-cidr: {{ .Values.ipam.operator.clusterPoolIPv4PodCIDRList | join " " | quote }}
   cluster-pool-ipv4-mask-size: {{ .Values.ipam.operator.clusterPoolIPv4MaskSize | quote }}
 {{- end }}
 {{- if .Values.ipv6.enabled }}
-  {{- if hasKey .Values.ipam.operator "clusterPoolIPv6PodCIDR" }}
-    {{- /* ipam.operator.clusterPoolIPv6PodCIDR removed in v1.14, remove this failsafe around v1.17 */ -}}
-    {{- fail "Value ipam.operator.clusterPoolIPv6PodCIDR removed, use ipam.operator.clusterPoolIPv6PodCIDRList instead" }}
-  {{- end }}
   cluster-pool-ipv6-cidr: {{ .Values.ipam.operator.clusterPoolIPv6PodCIDRList | join " " | quote }}
   cluster-pool-ipv6-mask-size: {{ .Values.ipam.operator.clusterPoolIPv6MaskSize | quote }}
 {{- end }}
@@ -1157,7 +1136,7 @@ data:
 {{- end }}
 
 {{- if .Values.egressGateway.enabled }}
-  enable-ipv4-egress-gateway: "true"
+  enable-egress-gateway: "true"
 {{- end }}
 {{- if hasKey .Values.egressGateway "reconciliationTriggerInterval" }}
   egress-gateway-reconciliation-trigger-interval: {{ .Values.egressGateway.reconciliationTriggerInterval | quote }}
@@ -1184,10 +1163,6 @@ data:
 
 {{- if .Values.crdWaitTimeout }}
   crd-wait-timeout: {{ include "validateDuration" .Values.crdWaitTimeout | quote }}
-{{- end }}
-
-{{- if .Values.enableK8sEndpointSlice }}
-  enable-k8s-endpoint-slice: {{ .Values.enableK8sEndpointSlice | quote }}
 {{- end }}
 
 {{- if hasKey .Values.k8s "serviceProxyName" }}
@@ -1228,6 +1203,8 @@ data:
   bgp-secrets-namespace: {{ .Values.bgpControlPlane.secretsNamespace.name | quote }}
   enable-bgp-control-plane-status-report: {{ .Values.bgpControlPlane.statusReport.enabled | quote }}
   bgp-router-id-allocation-mode: {{ .Values.bgpControlPlane.routerIDAllocation.mode | quote }}
+  bgp-router-id-allocation-ip-pool: {{ .Values.bgpControlPlane.routerIDAllocation.ipPool | quote }}
+  enable-bgp-legacy-origin-attribute: {{ .Values.bgpControlPlane.legacyOriginAttribute.enabled | quote }}
 {{- end }}
 
 {{- if .Values.pmtuDiscovery.enabled }}
@@ -1255,7 +1232,7 @@ data:
   disable-external-ip-mitigation: {{ .Values.bpf.disableExternalIPMitigation | quote }}
 {{- end }}
 
-{{- if or .Values.ciliumEndpointSlice.enabled .Values.enableCiliumEndpointSlice }}
+{{- if .Values.ciliumEndpointSlice.enabled }}
   enable-cilium-endpoint-slice: "true"
   {{- if .Values.ciliumEndpointSlice.rateLimits }}
   ces-rate-limits: {{ .Values.ciliumEndpointSlice.rateLimits | toJson | quote }}
@@ -1313,6 +1290,10 @@ data:
   unmanaged-pod-watcher-interval: "0"
 {{- end }}
 
+{{- if ne .Values.operator.unmanagedPodWatcher.selector nil }}
+  pod-restart-selector: {{ .Values.operator.unmanagedPodWatcher.selector }}
+{{- end }}
+
 {{- if .Values.dnsProxy }}
   {{- if hasKey .Values.dnsProxy "enableTransparentMode" }}
   # explicit setting gets precedence
@@ -1351,6 +1332,7 @@ data:
   {{- if .Values.dnsProxy.proxyResponseMaxDelay }}
   tofqdns-proxy-response-max-delay: {{ .Values.dnsProxy.proxyResponseMaxDelay | quote }}
   {{- end }}
+  tofqdns-preallocate-identities:  {{ .Values.dnsProxy.preAllocateIdentities | quote }}
 {{- end }}
 
 {{- if hasKey .Values "agentNotReadyTaintKey" }}
@@ -1413,11 +1395,11 @@ data:
   max-connected-clusters: {{ .Values.clustermesh.maxConnectedClusters | quote }}
 {{- end }}
   clustermesh-enable-endpoint-sync: {{ .Values.clustermesh.enableEndpointSliceSynchronization | quote }}
-  clustermesh-enable-mcs-api: {{ .Values.clustermesh.enableMCSAPISupport | quote }}
+  clustermesh-enable-mcs-api: {{ (or .Values.clustermesh.mcsapi.enabled .Values.clustermesh.enableMCSAPISupport) | quote }}
+  policy-default-local-cluster: {{ .Values.clustermesh.policyDefaultLocalCluster | quote }}
 
   nat-map-stats-entries: {{ .Values.nat.mapStatsEntries | quote }}
   nat-map-stats-interval: {{ .Values.nat.mapStatsInterval | quote }}
-  enable-internal-traffic-policy: {{ .Values.enableInternalTrafficPolicy | quote }}
   enable-lb-ipam: {{ .Values.enableLBIPAM | quote }}
   enable-non-default-deny-policies: {{ .Values.enableNonDefaultDenyPolicies | quote }}
 

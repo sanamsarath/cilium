@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
 #include <bpf/ctx/skb.h>
+#include "common.h"
 #include "pktgen.h"
 #include "node_config.h"
 #include "lib/encrypt.h"
@@ -18,7 +18,6 @@
 #define ENABLE_IPV4
 #define ENABLE_IPV6
 #define ENABLE_IPSEC
-#define IPV4_LOOPBACK 0
 
 #define TO_NETDEV 0
 
@@ -48,32 +47,25 @@ struct {
 	},
 };
 
-PKTGEN("tc", "ipsec_encryption_on_egress")
-int ipsec_encryption_on_egress_pktgen(struct __ctx_buff *ctx)
+PKTGEN("tc", "ipsec_encryption_on_egress_ipv4")
+int ipsec_encryption_on_egress_ipv4_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
-	struct ethhdr *l2;
 	struct iphdr *l3;
 
 	pktgen__init(&builder, ctx);
 
-	l2 = pktgen__push_ethhdr(&builder);
-	if (!l2)
-		return TEST_ERROR;
-	ethhdr__set_macs(l2, (__u8 *)mac_one, (__u8 *)mac_two);
-
-	l3 = pktgen__push_default_iphdr(&builder);
+	l3 = pktgen__push_ipv4_packet(&builder, (__u8 *)mac_one, (__u8 *)mac_two,
+				      v4_pod_one, v4_pod_two);
 	if (!l3)
 		return TEST_ERROR;
-	l3->saddr = v4_pod_one;
-	l3->daddr = v4_pod_two;
 
 	pktgen__finish(&builder);
 	return 0;
 }
 
-SETUP("tc", "ipsec_encryption_on_egress")
-int ipsec_encryption_on_egress_setup(struct __ctx_buff *ctx)
+SETUP("tc", "ipsec_encryption_on_egress_ipv4")
+int ipsec_encryption_on_egress_ipv4_setup(struct __ctx_buff *ctx)
 {
 	tail_call_static(ctx, entry_call_map, TO_NETDEV);
 	return TEST_ERROR;
@@ -86,8 +78,41 @@ int ipsec_encryption_on_egress_setup(struct __ctx_buff *ctx)
  * therefore, if this integration test fails, the datapath is no longer reliably
  * IPsec encrypting packets leaving the host.
  */
-CHECK("tc", "ipsec_encryption_on_egress")
-int ipsec_encryption_on_egress_check(__maybe_unused struct __ctx_buff *ctx)
+CHECK("tc", "ipsec_encryption_on_egress_ipv4")
+int ipsec_encryption_on_egress_ipv4_check(__maybe_unused struct __ctx_buff *ctx)
+{
+	test_init();
+	assert(hook_reached);
+	test_finish();
+}
+
+PKTGEN("tc", "ipsec_encryption_on_egress_ipv6")
+int ipsec_encryption_on_egress_ipv6_pktgen(struct __ctx_buff *ctx)
+{
+	struct pktgen builder;
+	struct ipv6hdr *l3;
+
+	pktgen__init(&builder, ctx);
+
+	l3 = pktgen__push_ipv6_packet(&builder, (__u8 *)mac_one, (__u8 *)mac_two,
+				      (__u8 *)v6_pod_one, (__u8 *)v6_pod_two);
+	if (!l3)
+		return TEST_ERROR;
+
+	pktgen__finish(&builder);
+	return 0;
+}
+
+SETUP("tc", "ipsec_encryption_on_egress_ipv6")
+int ipsec_encryption_on_egress_ipv6_setup(struct __ctx_buff *ctx)
+{
+	tail_call_static(ctx, entry_call_map, TO_NETDEV);
+	return TEST_ERROR;
+}
+
+/* See IPv4 comment */
+CHECK("tc", "ipsec_encryption_on_egress_ipv6")
+int ipsec_encryption_on_egress_ipv6_check(__maybe_unused struct __ctx_buff *ctx)
 {
 	test_init();
 	assert(hook_reached);

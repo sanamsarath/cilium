@@ -11,33 +11,33 @@ import (
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
 	"github.com/go-openapi/runtime"
-	"go.uber.org/goleak"
 
 	"github.com/cilium/cilium/api/v1/operator/server/restapi/operator"
 	"github.com/cilium/cilium/pkg/hive"
-	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
+	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/safeio"
+	"github.com/cilium/cilium/pkg/testutils"
 )
 
 func TestHealthHandlerK8sDisabled(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 		// ignore goroutine started from sigs.k8s.io/controller-runtime/pkg/log.go init function
-		goleak.IgnoreTopFunction("time.Sleep"),
+		testutils.GoleakIgnoreTopFunction("time.Sleep"),
 	)
 
 	rr := httptest.NewRecorder()
 
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		cell.Invoke(func(cs *k8sClient.FakeClientset) {
 			cs.Disable()
 		}),
 
+		kvstore.Cell(kvstore.DisabledBackendName),
+
 		HealthHandlerCell(
-			func() bool {
-				return false
-			},
 			func() bool {
 				return false
 			},
@@ -73,21 +73,19 @@ func TestHealthHandlerK8sDisabled(t *testing.T) {
 }
 
 func TestHealthHandlerK8sEnabled(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 		// ignore goroutine started from sigs.k8s.io/controller-runtime/pkg/log.go init function
-		goleak.IgnoreTopFunction("time.Sleep"),
+		testutils.GoleakIgnoreTopFunction("time.Sleep"),
 	)
 
 	rr := httptest.NewRecorder()
 
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
+		kvstore.Cell(kvstore.DisabledBackendName),
 
 		HealthHandlerCell(
-			func() bool {
-				return false
-			},
 			func() bool {
 				return false
 			},

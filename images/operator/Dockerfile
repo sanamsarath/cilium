@@ -1,10 +1,12 @@
+# check=error=true
+
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE=scratch
-ARG GOLANG_IMAGE=docker.io/library/golang:1.24.2@sha256:d9db32125db0c3a680cfb7a1afcaefb89c898a075ec148fdc2f0f646cc2ed509
-ARG ALPINE_IMAGE=docker.io/library/alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c
-ARG CILIUM_BUILDER_IMAGE=quay.io/cilium/cilium-builder:dafe1d5690acd008c6f86482eb69681ad692f5ea@sha256:5ae08955b7a99ca53f79aee0034809519430d91188db2796affe06d08dbd1ea9
+ARG GOLANG_IMAGE=docker.io/library/golang:1.25.0@sha256:5502b0e56fca23feba76dbc5387ba59c593c02ccc2f0f7355871ea9a0852cebe
+ARG ALPINE_IMAGE=docker.io/library/alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+ARG CILIUM_BUILDER_IMAGE=quay.io/cilium/cilium-builder:850a1e5a61b59edd3de68a2bff77bc2e0376ed23@sha256:8196c1f53a81f98a2ec841d1ce3fee6374f56ccadbf10c31a0d00726a1f84317
 
 # BUILDPLATFORM is an automatic platform ARG enabled by Docker BuildKit.
 # Represents the plataform where the build is happening, do not mix with
@@ -86,7 +88,10 @@ COPY --from=gops /out/${TARGETOS}/${TARGETARCH}/bin/gops /bin/gops
 COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/usr/bin/cilium-${OPERATOR_VARIANT} /usr/bin/cilium-${OPERATOR_VARIANT}
 COPY --from=builder /out/${TARGETOS}/${TARGETARCH}/LICENSE.all /LICENSE.all
 WORKDIR /
-ENV GOPS_CONFIG_DIR=/
+# Configure gops directory to prevent permission
+# issues depending on the UID configured to run the entrypoint.
+COPY --chmod=777 --from=scratch / /home/gops
+ENV GOPS_CONFIG_DIR=/home/gops
 CMD ["/usr/bin/cilium-${OPERATOR_VARIANT}"]
 
 FROM --platform=${BUILDPLATFORM} ${CILIUM_BUILDER_IMAGE} AS debug-tools
@@ -94,7 +99,7 @@ FROM --platform=${BUILDPLATFORM} ${CILIUM_BUILDER_IMAGE} AS debug-tools
 #
 # Cilium Operator debug image.
 #
-# Typical image bulids will stop above at the 'release' target, but
+# Typical image builds will stop above at the 'release' target, but
 # developers follow this Dockerfile to the end. Starting from a release
 # image, install delve debugger and wrap the cilium-operator binary calls
 # with a script that automatically provisions the debugger on a

@@ -6,12 +6,8 @@
 # Start the hive
 hive start
 
-# Wait for k8s watchers to be initialized
-k8s/wait-watchers cilium.io.v2.ciliumnodes cilium.io.v2.ciliumbgpnodeconfigs cilium.io.v2.ciliumbgppeerconfigs cilium.io.v2.ciliumbgpadvertisements
-k8s/wait-watchers v1.services
-
 # Configure gobgp server
-gobgp/add-server 65010 10.99.4.211 1790
+gobgp/add-server test 65010 10.99.4.211 1790
 
 # Configure peers on GoBGP
 gobgp/add-peer 10.99.4.212 65001
@@ -279,18 +275,26 @@ status:
     - ip: fd00:cc:dd::3
 
 -- endpoints.yaml --
-apiVersion: v1
-kind: Endpoints
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
 metadata:
-  name: svc3
-subsets:
+  labels:
+    kubernetes.io/service-name: svc3
+  name: svc3-eps1
+  uid: d1f517f6-ab88-4c76-9bd0-4906a17cdd75
+addressType: IPv4
+endpoints:
 - addresses:
-  - ip: 10.244.1.20
-    nodeName: test-node
-  ports:
-  - name: http
-    port: 80
-    protocol: TCP
+  - 10.244.1.20
+  conditions:
+    ready: true
+    serving: true
+    terminating: false
+  nodeName: test-node
+ports:
+- name: http
+  port: 80
+  protocol: TCP
 
 -- gobgp-routes-aggregated-ipv4-1.expected --
 Prefix            NextHop       Attrs

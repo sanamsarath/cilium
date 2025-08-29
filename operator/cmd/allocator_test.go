@@ -20,8 +20,8 @@ import (
 	"github.com/cilium/cilium/pkg/ipam/cidrset"
 	"github.com/cilium/cilium/pkg/ipam/types"
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	cilium_fake "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/fake"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
@@ -38,6 +38,7 @@ func TestPodCIDRAllocatorOverlap(t *testing.T) {
 }
 
 func podCIDRAllocatorOverlapTestRun(t *testing.T) {
+	logger := hivetest.Logger(t)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -92,7 +93,7 @@ func podCIDRAllocatorOverlapTestRun(t *testing.T) {
 	}, nil, &ciliumNodeUpdateImplementation{clientset: fakeSet}, nil)
 
 	// start synchronization.
-	cns := newCiliumNodeSynchronizer(fakeSet, podCidrManager, false)
+	cns := newCiliumNodeSynchronizer(logger, fakeSet, nil, podCidrManager, false, nil)
 	if err := cns.Start(ctx, &wg, nil); err != nil {
 		t.Fatal(err)
 	}

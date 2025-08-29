@@ -1,4 +1,4 @@
-#! --enable-experimental-lb --lb-test-fault-probability=0.0
+#! --lb-test-fault-probability=0.0
 #
 # Test JSON and YAML marshalling of load-balancer tables.
 #
@@ -7,7 +7,6 @@
 #
 
 hive/start
-db/initialized
 
 # Add our test service and backends. To avoid undeterministic ID allocation
 # add the IPv4 endpoints first.
@@ -21,7 +20,7 @@ db/show services -f json -o services-actual.json
 cmp services-actual.json services-expected.json
 db/show frontends -f json -o frontends-actual.json
 sed '"updated-at":.*' '"updated-at": <redacted>,' frontends-actual.json
-sed '"id":.*' '"id": <redacted>' frontends-actual.json
+sed '"id":.*' '"id": <redacted>,' frontends-actual.json
 cmp frontends-actual.json frontends-expected.json
 db/show backends -f json -o backends-actual.json
 cmp backends-actual.json backends-expected.json
@@ -52,11 +51,7 @@ Address              Instances
 
 -- services-expected.json --
 {
-  "Name": {
-    "Namespace": "test",
-    "Name": "echo",
-    "Cluster": ""
-  },
+  "Name": "test/echo",
   "Source": "k8s",
   "Labels": {},
   "Annotations": null,
@@ -66,8 +61,10 @@ Address              Instances
   "NatPolicy": "",
   "ExtTrafficPolicy": "Cluster",
   "IntTrafficPolicy": "Cluster",
+  "ForwardingMode": "",
   "SessionAffinity": false,
   "SessionAffinityTimeout": 0,
+  "LoadBalancerClass": null,
   "ProxyRedirect": null,
   "HealthCheckNodePort": 0,
   "LoopbackHostPort": false,
@@ -75,95 +72,96 @@ Address              Instances
   "PortNames": {
     "http": 80
   },
-  "TrafficDistribution": "",
-  "Properties": []
+  "TrafficDistribution": ""
 }
 -- frontends-expected.json --
 {
-  "Address": {
-    "AddrCluster": "10.96.50.104",
-    "Protocol": "TCP",
-    "Port": 80,
-    "Scope": 0
-  },
+  "Address": "10.96.50.104:80/TCP",
   "Type": "ClusterIP",
-  "ServiceName": {
-    "Namespace": "test",
-    "Name": "echo",
-    "Cluster": ""
-  },
+  "ServiceName": "test/echo",
   "PortName": "http",
   "ServicePort": 80,
   "Status": {
-    "kind": "Done",
     "updated-at": <redacted>,
-    "id": <redacted>
+    "id": <redacted>,
+    "kind": "Done"
   },
   "Backends": [
     {
-      "Address": {
-        "AddrCluster": "10.244.1.1",
-        "Protocol": "TCP",
-        "Port": 8080,
-        "Scope": 0
-      },
+      "Address": "10.244.1.1:8080/TCP",
       "PortNames": [
         "http"
       ],
       "Weight": 100,
       "NodeName": "nodeport-worker",
-      "Zone": "",
-      "ForZones": null,
+      "Zone": null,
       "ClusterID": 0,
       "Source": "k8s",
       "State": 0,
       "Unhealthy": false,
-      "UnhealthyUpdatedAt": "0001-01-01T00:00:00Z"
+      "UnhealthyUpdatedAt": null
+    }
+  ],
+  "HealthCheckBackends": [
+    {
+      "Address": "10.244.1.1:8080/TCP",
+      "PortNames": [
+        "http"
+      ],
+      "Weight": 100,
+      "NodeName": "nodeport-worker",
+      "Zone": null,
+      "ClusterID": 0,
+      "Source": "k8s",
+      "State": 0,
+      "Unhealthy": false,
+      "UnhealthyUpdatedAt": null
     }
   ],
   "ID": 1,
   "RedirectTo": null
 }
 {
-  "Address": {
-    "AddrCluster": "2001::1",
-    "Protocol": "TCP",
-    "Port": 80,
-    "Scope": 0
-  },
+  "Address": "[2001::1]:80/TCP",
   "Type": "ClusterIP",
-  "ServiceName": {
-    "Namespace": "test",
-    "Name": "echo",
-    "Cluster": ""
-  },
+  "ServiceName": "test/echo",
   "PortName": "http",
   "ServicePort": 80,
   "Status": {
-    "kind": "Done",
     "updated-at": <redacted>,
-    "id": <redacted>
+    "id": <redacted>,
+    "kind": "Done"
   },
   "Backends": [
     {
-      "Address": {
-        "AddrCluster": "2002::2",
-        "Protocol": "TCP",
-        "Port": 8080,
-        "Scope": 0
-      },
+      "Address": "[2002::2]:8080/TCP",
       "PortNames": [
         "http"
       ],
       "Weight": 100,
       "NodeName": "nodeport-worker",
-      "Zone": "",
-      "ForZones": null,
+      "Zone": null,
       "ClusterID": 0,
       "Source": "k8s",
       "State": 0,
       "Unhealthy": false,
-      "UnhealthyUpdatedAt": "0001-01-01T00:00:00Z"
+      "UnhealthyUpdatedAt": null
+    }
+  ],
+  "HealthCheckBackends": [
+    {
+      "Address": "[2002::2]:8080/TCP",
+      "PortNames": [
+        "http"
+      ],
+      "Weight": 100,
+      "NodeName": "nodeport-worker",
+      "Zone": null,
+      "ClusterID": 0,
+      "Source": "k8s",
+      "State": 0,
+      "Unhealthy": false,
+      "UnhealthyUpdatedAt": null
     }
   ],
   "ID": 2,
@@ -171,81 +169,51 @@ Address              Instances
 }
 -- backends-expected.json --
 {
-  "Address": {
-    "AddrCluster": "10.244.1.1",
-    "Protocol": "TCP",
-    "Port": 8080,
-    "Scope": 0
-  },
+  "Address": "10.244.1.1:8080/TCP",
   "Instances": [
     {
       "k": {
-        "ServiceName": {
-          "Namespace": "test",
-          "Name": "echo",
-          "Cluster": ""
-        },
+        "ServiceName": "test/echo",
         "SourcePriority": 4
       },
       "v": {
-        "Address": {
-          "AddrCluster": {},
-          "Protocol": "TCP",
-          "Port": 8080,
-          "Scope": 0
-        },
+        "Address": "10.244.1.1:8080/TCP",
         "PortNames": [
           "http"
         ],
         "Weight": 100,
         "NodeName": "nodeport-worker",
-        "Zone": "",
-        "ForZones": null,
+        "Zone": null,
         "ClusterID": 0,
         "Source": "k8s",
         "State": 0,
         "Unhealthy": false,
-        "UnhealthyUpdatedAt": "0001-01-01T00:00:00Z"
+        "UnhealthyUpdatedAt": null
       }
     }
   ]
 }
 {
-  "Address": {
-    "AddrCluster": "2002::2",
-    "Protocol": "TCP",
-    "Port": 8080,
-    "Scope": 0
-  },
+  "Address": "[2002::2]:8080/TCP",
   "Instances": [
     {
       "k": {
-        "ServiceName": {
-          "Namespace": "test",
-          "Name": "echo",
-          "Cluster": ""
-        },
+        "ServiceName": "test/echo",
         "SourcePriority": 4
       },
       "v": {
-        "Address": {
-          "AddrCluster": {},
-          "Protocol": "TCP",
-          "Port": 8080,
-          "Scope": 0
-        },
+        "Address": "[2002::2]:8080/TCP",
         "PortNames": [
           "http"
         ],
         "Weight": 100,
         "NodeName": "nodeport-worker",
-        "Zone": "",
-        "ForZones": null,
+        "Zone": null,
         "ClusterID": 0,
         "Source": "k8s",
         "State": 0,
         "Unhealthy": false,
-        "UnhealthyUpdatedAt": "0001-01-01T00:00:00Z"
+        "UnhealthyUpdatedAt": null
       }
     }
   ]
@@ -260,8 +228,10 @@ selector:
 natpolicy: ""
 exttrafficpolicy: Cluster
 inttrafficpolicy: Cluster
+forwardingmode: ""
 sessionaffinity: false
 sessionaffinitytimeout: 0s
+loadbalancerclass: null
 proxyredirect: null
 healthchecknodeport: 0
 loopbackhostport: false
@@ -269,7 +239,6 @@ sourceranges: []
 portnames:
     http: 80
 trafficdistribution: ""
-properties: []
 -- frontends-expected.yaml --
 frontendparams:
     address: 10.96.50.104:80/TCP
@@ -278,22 +247,33 @@ frontendparams:
     portname: http
     serviceport: 80
 status:
-    kind: Done
     updated-at: <redacted>
     id: <redacted>
+    kind: Done
 backends:
     - address: 10.244.1.1:8080/TCP
       portnames:
         - http
       weight: 100
       nodename: nodeport-worker
-      zone: ""
-      forzones: []
+      zone: null
       clusterid: 0
       source: k8s
       state: 0
       unhealthy: false
-      unhealthyupdatedat: 0001-01-01T00:00:00Z
+      unhealthyupdatedat: null
+healthcheckbackends:
+    - address: 10.244.1.1:8080/TCP
+      portnames:
+        - http
+      weight: 100
+      nodename: nodeport-worker
+      zone: null
+      clusterid: 0
+      source: k8s
+      state: 0
+      unhealthy: false
+      unhealthyupdatedat: null
 id: 1
 redirectto: null
 ---
@@ -304,22 +284,33 @@ frontendparams:
     portname: http
     serviceport: 80
 status:
-    kind: Done
     updated-at: <redacted>
     id: <redacted>
+    kind: Done
 backends:
     - address: '[2002::2]:8080/TCP'
       portnames:
         - http
       weight: 100
       nodename: nodeport-worker
-      zone: ""
-      forzones: []
+      zone: null
       clusterid: 0
       source: k8s
       state: 0
       unhealthy: false
-      unhealthyupdatedat: 0001-01-01T00:00:00Z
+      unhealthyupdatedat: null
+healthcheckbackends:
+    - address: '[2002::2]:8080/TCP'
+      portnames:
+        - http
+      weight: 100
+      nodename: nodeport-worker
+      zone: null
+      clusterid: 0
+      source: k8s
+      state: 0
+      unhealthy: false
+      unhealthyupdatedat: null
 id: 2
 redirectto: null
 -- backends-expected.yaml --
@@ -334,13 +325,12 @@ instances:
             - http
         weight: 100
         nodename: nodeport-worker
-        zone: ""
-        forzones: []
+        zone: null
         clusterid: 0
         source: k8s
         state: 0
         unhealthy: false
-        unhealthyupdatedat: 0001-01-01T00:00:00Z
+        unhealthyupdatedat: null
 ---
 address: '[2002::2]:8080/TCP'
 instances:
@@ -353,13 +343,12 @@ instances:
             - http
         weight: 100
         nodename: nodeport-worker
-        zone: ""
-        forzones: []
+        zone: null
         clusterid: 0
         source: k8s
         state: 0
         unhealthy: false
-        unhealthyupdatedat: 0001-01-01T00:00:00Z
+        unhealthyupdatedat: null
 -- service.yaml --
 apiVersion: v1
 kind: Service

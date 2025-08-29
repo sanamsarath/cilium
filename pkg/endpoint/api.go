@@ -9,6 +9,7 @@ package endpoint
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sort"
@@ -36,6 +37,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
+	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 // GetLabelsModel returns the labels of the endpoint in their representation
@@ -62,12 +64,12 @@ func (e *Endpoint) GetLabelsModel() (*models.LabelConfiguration, error) {
 }
 
 // NewEndpointFromChangeModel creates a new endpoint from a request
-func NewEndpointFromChangeModel(ctx context.Context, dnsRulesAPI DNSRulesAPI, epBuildQueue EndpointBuildQueue, loader datapath.Loader, orchestrator datapath.Orchestrator, compilationLock datapath.CompilationLock, bandwidthManager datapath.BandwidthManager, ipTablesManager datapath.IptablesManager, identityManager identitymanager.IDManager, monitorAgent monitoragent.Agent, policyMapFactory policymap.Factory, policyRepo policy.PolicyRepository, namedPortsGetter namedPortsGetter, proxy EndpointProxy, allocator cache.IdentityAllocator, ctMapGC ctmap.GCRunner, kvstoreSyncher *ipcache.IPIdentitySynchronizer, model *models.EndpointChangeRequest) (*Endpoint, error) {
+func NewEndpointFromChangeModel(ctx context.Context, logger *slog.Logger, dnsRulesAPI DNSRulesAPI, epBuildQueue EndpointBuildQueue, loader datapath.Loader, orchestrator datapath.Orchestrator, compilationLock datapath.CompilationLock, bandwidthManager datapath.BandwidthManager, ipTablesManager datapath.IptablesManager, identityManager identitymanager.IDManager, monitorAgent monitoragent.Agent, policyMapFactory policymap.Factory, policyRepo policy.PolicyRepository, namedPortsGetter namedPortsGetter, proxy EndpointProxy, allocator cache.IdentityAllocator, ctMapGC ctmap.GCRunner, kvstoreSyncher *ipcache.IPIdentitySynchronizer, model *models.EndpointChangeRequest, wgCfg wgTypes.WireguardConfig) (*Endpoint, error) {
 	if model == nil {
 		return nil, nil
 	}
 
-	ep := createEndpoint(dnsRulesAPI, epBuildQueue, loader, orchestrator, compilationLock, bandwidthManager, ipTablesManager, identityManager, monitorAgent, policyMapFactory, policyRepo, namedPortsGetter, proxy, allocator, ctMapGC, kvstoreSyncher, uint16(model.ID), model.InterfaceName)
+	ep := createEndpoint(logger, dnsRulesAPI, epBuildQueue, loader, orchestrator, compilationLock, bandwidthManager, ipTablesManager, identityManager, monitorAgent, policyMapFactory, policyRepo, namedPortsGetter, proxy, allocator, ctMapGC, kvstoreSyncher, uint16(model.ID), model.InterfaceName, wgCfg)
 	ep.ifIndex = int(model.InterfaceIndex)
 	ep.containerIfName = model.ContainerInterfaceName
 	ep.parentIfIndex = int(model.ParentInterfaceIndex)
@@ -573,7 +575,7 @@ func (e *Endpoint) ProcessChangeRequest(newEp *Endpoint, validPatchTransitionSta
 	rev := e.replaceIdentityLabels(labels.LabelSourceAny, newEp.labels.IdentityLabels())
 	if rev != 0 {
 		// Run as a goroutine since the runIdentityResolver needs to get the lock
-		go e.runIdentityResolver(e.aliveCtx, false)
+		go e.runIdentityResolver(e.aliveCtx, false, 0)
 	}
 
 	// If desired state is waiting-for-identity but identity is already

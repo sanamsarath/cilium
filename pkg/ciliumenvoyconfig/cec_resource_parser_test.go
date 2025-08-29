@@ -11,15 +11,15 @@ import (
 
 	"github.com/cilium/hive/hivetest"
 	cilium "github.com/cilium/proxy/go/cilium/api"
-	envoy_config_cluster "github.com/cilium/proxy/go/envoy/config/cluster/v3"
-	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
-	envoy_config_listener "github.com/cilium/proxy/go/envoy/config/listener/v3"
-	envoy_config_http_healthcheck "github.com/cilium/proxy/go/envoy/extensions/filters/http/health_check/v3"
-	envoy_upstream_codec "github.com/cilium/proxy/go/envoy/extensions/filters/http/upstream_codec/v3"
-	envoy_config_http "github.com/cilium/proxy/go/envoy/extensions/filters/network/http_connection_manager/v3"
-	envoy_config_tcp "github.com/cilium/proxy/go/envoy/extensions/filters/network/tcp_proxy/v3"
-	envoy_config_tls "github.com/cilium/proxy/go/envoy/extensions/transport_sockets/tls/v3"
-	envoy_upstreams_http_v3 "github.com/cilium/proxy/go/envoy/extensions/upstreams/http/v3"
+	envoy_config_cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	envoy_config_core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	envoy_config_http_healthcheck "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	envoy_upstream_codec "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/upstream_codec/v3"
+	envoy_config_http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	envoy_config_tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	envoy_config_tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoy_upstreams_http_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,7 +63,7 @@ func (m *MockPortAllocator) AllocateCRDProxyPort(name string) (uint16, error) {
 	return m.port, nil
 }
 
-func (m *MockPortAllocator) AckProxyPort(ctx context.Context, name string) error {
+func (m *MockPortAllocator) AckProxyPortWithReference(ctx context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1004,7 +1004,6 @@ spec:
 `
 
 func TestCiliumEnvoyConfigTCPProxyTermination(t *testing.T) {
-
 	parser := CECResourceParser{
 		logger:        hivetest.Logger(t),
 		portAllocator: NewMockPortAllocator(),
@@ -1782,6 +1781,94 @@ func Test_injectCiliumEnvoyFilters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := InjectCiliumEnvoyFilters(tt.meta, tt.spec)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func Test_isL7LB(t *testing.T) {
+	tests := []struct {
+		name string
+		meta *metav1.ObjectMeta
+		spec *cilium_v2.CiliumEnvoyConfigSpec
+		want bool
+	}{
+		{
+			name: "L7LB services defined",
+			meta: &metav1.ObjectMeta{},
+			spec: &cilium_v2.CiliumEnvoyConfigSpec{
+				Services: []*cilium_v2.ServiceListener{{
+					Name: "test",
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "L7LB services defined but override via annotation",
+			meta: &metav1.ObjectMeta{
+				Annotations: map[string]string{
+					annotation.CECIsL7LB: "false",
+				},
+			},
+			spec: &cilium_v2.CiliumEnvoyConfigSpec{
+				Services: []*cilium_v2.ServiceListener{{
+					Name: "test",
+				}},
+			},
+			want: false,
+		},
+		{
+			name: "No L7LB services but explicit inject via annotation",
+			meta: &metav1.ObjectMeta{
+				Annotations: map[string]string{
+					annotation.CECIsL7LB: "true",
+				},
+			},
+			spec: &cilium_v2.CiliumEnvoyConfigSpec{
+				Services: []*cilium_v2.ServiceListener{},
+			},
+			want: true,
+		},
+		{
+			name: "L7LB services defined and invalid annotation value",
+			meta: &metav1.ObjectMeta{
+				Annotations: map[string]string{
+					annotation.CECIsL7LB: "invalid",
+				},
+			},
+			spec: &cilium_v2.CiliumEnvoyConfigSpec{
+				Services: []*cilium_v2.ServiceListener{{
+					Name: "test",
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "No L7LB services and invalid annotation value",
+			meta: &metav1.ObjectMeta{
+				Annotations: map[string]string{
+					annotation.CECIsL7LB: "invalid",
+				},
+			},
+			spec: &cilium_v2.CiliumEnvoyConfigSpec{
+				Services: []*cilium_v2.ServiceListener{},
+			},
+			want: false,
+		},
+		{
+			name: "No L7LB services and no annotation",
+			meta: &metav1.ObjectMeta{
+				Annotations: map[string]string{},
+			},
+			spec: &cilium_v2.CiliumEnvoyConfigSpec{
+				Services: []*cilium_v2.ServiceListener{},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isL7LB(tt.meta, tt.spec)
 			assert.Equal(t, tt.want, got)
 		})
 	}

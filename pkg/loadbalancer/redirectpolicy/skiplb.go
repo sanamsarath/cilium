@@ -29,10 +29,8 @@ import (
 	"github.com/cilium/cilium/pkg/ebpf"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
-	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	lbmaps "github.com/cilium/cilium/pkg/loadbalancer/maps"
-	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -44,7 +42,7 @@ type skiplbParams struct {
 	DB                 *statedb.DB
 	Lifecycle          cell.Lifecycle
 	DesiredSkipLB      statedb.RWTable[*desiredSkipLB]
-	Map                lbmap.SkipLBMap
+	Map                lbmaps.SkipLBMap
 	EM                 endpointmanager.EndpointManager `optional:"true"`
 	NetNSCookieSupport lbmaps.HaveNetNSCookieSupport
 }
@@ -103,7 +101,7 @@ func skipRedirectsEqual(a, b map[loadbalancer.ServiceName][]loadbalancer.L3n4Add
 		if !ok {
 			return false
 		}
-		if !slices.EqualFunc(addrA, addrB, func(a, b loadbalancer.L3n4Addr) bool { return a.DeepEqual(&b) }) {
+		if !slices.Equal(addrA, addrB) {
 			return false
 		}
 	}
@@ -112,14 +110,14 @@ func skipRedirectsEqual(a, b map[loadbalancer.ServiceName][]loadbalancer.L3n4Add
 
 type desiredSkipLB struct {
 	PodNamespacedName        string
-	LRPID                    k8s.ServiceID
+	LRPID                    loadbalancer.ServiceName
 	SkipRedirectForFrontends map[loadbalancer.ServiceName][]loadbalancer.L3n4Addr
 	ReconciledAddrs          sets.Set[loadbalancer.L3n4Addr]
 	NetnsCookie              *uint64
 	Status                   reconciler.Status
 }
 
-func newDesiredSkipLB(lrpID k8s.ServiceID, pod string) *desiredSkipLB {
+func newDesiredSkipLB(lrpID loadbalancer.ServiceName, pod string) *desiredSkipLB {
 	return &desiredSkipLB{
 		PodNamespacedName:        pod,
 		LRPID:                    lrpID,
@@ -156,7 +154,7 @@ func (dsl *desiredSkipLB) TableRow() []string {
 		dsl.LRPID.String(),
 		strings.Join(skipRedirects, ", "),
 		cookie,
-		string(dsl.Status.Kind),
+		dsl.Status.Kind.String(),
 		duration.HumanDuration(time.Since(dsl.Status.UpdatedAt)),
 	}
 }
@@ -176,35 +174,32 @@ var (
 		FromString: index.FromString,
 		Unique:     true,
 	}
-	desiredSkipLBLRPIndex = statedb.Index[*desiredSkipLB, k8s.ServiceID]{
+	desiredSkipLBLRPIndex = statedb.Index[*desiredSkipLB, loadbalancer.ServiceName]{
 		Name: "lrp-id",
 		FromObject: func(obj *desiredSkipLB) index.KeySet {
 			return index.NewKeySet(index.String(obj.LRPID.String()))
 		},
-		FromKey:    index.Stringer[k8s.ServiceID],
+		FromKey:    index.Stringer[loadbalancer.ServiceName],
 		FromString: index.FromString,
 		Unique:     false,
 	}
 )
 
 func newDesiredSkipLBTable(db *statedb.DB) (statedb.RWTable[*desiredSkipLB], error) {
-	tbl, err := statedb.NewTable(
+	return statedb.NewTable(
+		db,
 		"desired-skiplbmap",
 		desiredSkipLBPodIndex,
 		desiredSkipLBLRPIndex,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return tbl, db.RegisterTable(tbl)
 }
 
 type skiplbOps struct {
-	m lbmap.SkipLBMap
+	m lbmaps.SkipLBMap
 }
 
 // Delete implements reconciler.Operations.
-func (ops *skiplbOps) Delete(ctx context.Context, txn statedb.ReadTxn, d *desiredSkipLB) (err error) {
+func (ops *skiplbOps) Delete(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revision, d *desiredSkipLB) (err error) {
 	if d.NetnsCookie == nil {
 		return nil
 	}
@@ -212,16 +207,16 @@ func (ops *skiplbOps) Delete(ctx context.Context, txn statedb.ReadTxn, d *desire
 	for addr := range d.ReconciledAddrs {
 		var deleteErr error
 		if addr.IsIPv6() {
-			deleteErr = ops.m.DeleteLB6(&lbmap.SkipLB6Key{
+			deleteErr = ops.m.DeleteLB6(&lbmaps.SkipLB6Key{
 				NetnsCookie: *d.NetnsCookie,
-				Address:     addr.AddrCluster.Addr().As16(),
-				Port:        addr.Port,
+				Address:     addr.Addr().As16(),
+				Port:        addr.Port(),
 			})
 		} else {
-			deleteErr = ops.m.DeleteLB4(&lbmap.SkipLB4Key{
+			deleteErr = ops.m.DeleteLB4(&lbmaps.SkipLB4Key{
 				NetnsCookie: *d.NetnsCookie,
-				Address:     addr.AddrCluster.Addr().As4(),
-				Port:        addr.Port,
+				Address:     addr.Addr().As4(),
+				Port:        addr.Port(),
 			})
 		}
 		if deleteErr != nil && !errors.Is(deleteErr, ebpf.ErrKeyNotExist) {
@@ -260,7 +255,7 @@ func (ops *skiplbOps) Prune(ctx context.Context, txn statedb.ReadTxn, objs iter.
 }
 
 // Update implements reconciler.Operations.
-func (ops *skiplbOps) Update(ctx context.Context, txn statedb.ReadTxn, d *desiredSkipLB) (err error) {
+func (ops *skiplbOps) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.Revision, d *desiredSkipLB) (err error) {
 	if d.NetnsCookie == nil {
 		return nil
 	}
@@ -270,9 +265,9 @@ func (ops *skiplbOps) Update(ctx context.Context, txn statedb.ReadTxn, d *desire
 		for _, addr := range addrs {
 			var addErr error
 			if addr.IsIPv6() {
-				addErr = ops.m.AddLB6(*d.NetnsCookie, addr.AddrCluster.AsNetIP(), addr.Port)
+				addErr = ops.m.AddLB6(*d.NetnsCookie, addr.AddrCluster().AsNetIP(), addr.Port())
 			} else {
-				addErr = ops.m.AddLB4(*d.NetnsCookie, addr.AddrCluster.AsNetIP(), addr.Port)
+				addErr = ops.m.AddLB4(*d.NetnsCookie, addr.AddrCluster().AsNetIP(), addr.Port())
 			}
 			if addErr != nil {
 				err = errors.Join(err, addErr)
@@ -285,16 +280,16 @@ func (ops *skiplbOps) Update(ctx context.Context, txn statedb.ReadTxn, d *desire
 	for addr := range d.ReconciledAddrs.Difference(newAddrs) {
 		var deleteErr error
 		if addr.IsIPv6() {
-			deleteErr = ops.m.DeleteLB6(&lbmap.SkipLB6Key{
+			deleteErr = ops.m.DeleteLB6(&lbmaps.SkipLB6Key{
 				NetnsCookie: *d.NetnsCookie,
-				Address:     addr.AddrCluster.Addr().As16(),
-				Port:        addr.Port,
+				Address:     addr.Addr().As16(),
+				Port:        addr.Port(),
 			})
 		} else {
-			deleteErr = ops.m.DeleteLB4(&lbmap.SkipLB4Key{
+			deleteErr = ops.m.DeleteLB4(&lbmaps.SkipLB4Key{
 				NetnsCookie: *d.NetnsCookie,
-				Address:     addr.AddrCluster.Addr().As4(),
-				Port:        addr.Port,
+				Address:     addr.Addr().As4(),
+				Port:        addr.Port(),
 			})
 		}
 		if deleteErr != nil && !errors.Is(deleteErr, ebpf.ErrKeyNotExist) {
@@ -333,7 +328,7 @@ func (sub *skiplbEndpointSubscriber) EndpointCreated(ep *endpoint.Endpoint) {
 	if old, _, found := sub.desiredSkipLB.Get(wtxn, desiredSkipLBPodIndex.Query(ep.GetK8sNamespaceAndPodName())); found {
 		dsl = old.clone()
 	} else {
-		dsl = newDesiredSkipLB(k8s.ServiceID{}, ep.GetK8sNamespaceAndPodName())
+		dsl = newDesiredSkipLB(loadbalancer.ServiceName{}, ep.GetK8sNamespaceAndPodName())
 	}
 	dsl.NetnsCookie = &cookie
 	sub.desiredSkipLB.Insert(wtxn, dsl)
@@ -349,7 +344,7 @@ func (sub *skiplbEndpointSubscriber) EndpointDeleted(ep *endpoint.Endpoint, conf
 	defer wtxn.Commit()
 	sub.desiredSkipLB.Delete(
 		wtxn,
-		newDesiredSkipLB(k8s.ServiceID{}, ep.GetK8sNamespaceAndPodName()),
+		newDesiredSkipLB(loadbalancer.ServiceName{}, ep.GetK8sNamespaceAndPodName()),
 	)
 }
 
@@ -360,33 +355,34 @@ func (sub *skiplbEndpointSubscriber) EndpointRestored(ep *endpoint.Endpoint) {
 
 // TestSkipLBMap is a SkipLBMap that the test suite can provide to override the
 // map implementation.
-type TestSkipLBMap lbmap.SkipLBMap
+type TestSkipLBMap lbmaps.SkipLBMap
 
 type skiplbmapParams struct {
 	cell.In
 
-	IsEnabled          lrpIsEnabled
+	Logger             *slog.Logger
 	TestSkipLBMap      TestSkipLBMap `optional:"true"`
 	Lifecycle          cell.Lifecycle
 	NetNSCookieSupport lbmaps.HaveNetNSCookieSupport
 }
 
-func newSkipLBMap(p skiplbmapParams) (out bpf.MapOut[lbmap.SkipLBMap], err error) {
-	if !p.IsEnabled {
-		return
-	}
-
+func newSkipLBMap(p skiplbmapParams) (out bpf.MapOut[lbmaps.SkipLBMap], err error) {
 	if p.TestSkipLBMap != nil {
-		m := lbmap.SkipLBMap(p.TestSkipLBMap)
+		m := lbmaps.SkipLBMap(p.TestSkipLBMap)
 		out = bpf.NewMapOut(m)
 		return
 	}
 
-	var m lbmap.SkipLBMap
-	m, err = lbmap.NewSkipLBMap()
+	var m lbmaps.SkipLBMap
+	m, err = lbmaps.NewSkipLBMap(p.Logger)
 	if err != nil {
 		return
 	}
+
+	if os.Getuid() != 0 {
+		return
+	}
+
 	p.Lifecycle.Append(cell.Hook{
 		OnStart: func(cell.HookContext) error {
 			if !p.NetNSCookieSupport() {
@@ -402,7 +398,7 @@ func newSkipLBMap(p skiplbmapParams) (out bpf.MapOut[lbmap.SkipLBMap], err error
 	return
 }
 
-func newSkipLBMapCommand(m lbmap.SkipLBMap) hive.ScriptCmdsOut {
+func newSkipLBMapCommand(m lbmaps.SkipLBMap) hive.ScriptCmdsOut {
 	if m == nil {
 		return hive.NewScriptCmds(nil)
 	}

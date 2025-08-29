@@ -13,18 +13,21 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
-	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
-	envoy_config_endpoint "github.com/cilium/proxy/go/envoy/config/endpoint/v3"
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/part"
 	"github.com/cilium/statedb/reconciler"
+	envoy_config_core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/cilium/cilium/pkg/endpoint/regeneration"
+	"github.com/cilium/cilium/pkg/hive"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/loadbalancer/writer"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -35,6 +38,7 @@ type cecControllerParams struct {
 	DB             *statedb.DB
 	JobGroup       job.Group
 	ExpConfig      loadbalancer.Config
+	DaemonConfig   *option.DaemonConfig
 	Metrics        Metrics
 	CECs           statedb.Table[*CEC]
 	EnvoyResources statedb.RWTable[*EnvoyResource]
@@ -63,10 +67,9 @@ type cecController struct {
 }
 
 func registerCECController(params cecControllerParams) {
-	if !params.ExpConfig.EnableExperimentalLB {
+	if !params.DaemonConfig.EnableL7Proxy || !params.DaemonConfig.EnableEnvoyConfig {
 		return
 	}
-
 	c := &cecController{
 		cecControllerParams: params,
 	}
@@ -219,8 +222,6 @@ func (c *cecProcessor) process(wtxn statedb.WriteTxn, closedWatches []<-chan str
 	}
 
 	c.orphans = existing
-
-	return
 }
 
 func (c *cecProcessor) processCEC(wtxn statedb.WriteTxn, cecName CECName) *statedb.WatchSet {
@@ -247,9 +248,9 @@ func (c *cecProcessor) processCEC(wtxn statedb.WriteTxn, cecName CECName) *state
 	for svcName, ports := range cec.ServicePorts {
 		resName := EnvoyResourceName{
 			Origin:    EnvoyResourceOriginBackendSync,
-			Cluster:   svcName.Cluster,
-			Namespace: svcName.Namespace,
-			Name:      svcName.Name,
+			Cluster:   svcName.Cluster(),
+			Namespace: svcName.Namespace(),
+			Name:      svcName.Name(),
 		}
 
 		res, _, found := c.envoyResources.Get(wtxn, EnvoyResourceByName(resName))
@@ -298,9 +299,9 @@ func (c *cecProcessor) processCEC(wtxn statedb.WriteTxn, cecName CECName) *state
 func (c *cecProcessor) removeClusterReference(wtxn statedb.WriteTxn, cecName CECName, svcName loadbalancer.ServiceName) {
 	res, _, found := c.envoyResources.Get(wtxn, EnvoyResourceByName(EnvoyResourceName{
 		Origin:    EnvoyResourceOriginBackendSync,
-		Cluster:   svcName.Cluster,
-		Namespace: svcName.Namespace,
-		Name:      svcName.Name,
+		Cluster:   svcName.Cluster(),
+		Namespace: svcName.Namespace(),
+		Name:      svcName.Name(),
 	}))
 	if found {
 		newRefs := res.ClusterReferences.Remove(cecName)
@@ -411,13 +412,22 @@ func computeLoadAssignments(
 		}
 	}
 
+	// Keep track of number of active and terminating backends and only use
+	// terminating backends if active are not available.
+	numActive, numTerminating := 0, 0
+
 	for be := range backends {
-		if be.State != loadbalancer.BackendStateActive || be.Unhealthy {
-			// Skip non-active or unhealthy backends.
+		bePortNames := []string{anyPort}
+
+		switch be.State {
+		case loadbalancer.BackendStateActive:
+			numActive++
+		case loadbalancer.BackendStateTerminating:
+			numTerminating++
+		default:
+			// Skip backends in quarantine or maintenance.
 			continue
 		}
-
-		bePortNames := []string{anyPort}
 
 		// If ports are specified only pick the backends that match the service port name or number.
 		if len(ports) > 0 {
@@ -471,14 +481,19 @@ func computeLoadAssignments(
 
 	for _, port := range slices.Sorted(maps.Keys(backendMap)) {
 		bes := backendMap[port]
+
 		var lbEndpoints []*envoy_config_endpoint.LbEndpoint
 		for _, addr := range slices.Sorted(maps.Keys(bes)) {
 			be := bes[addr]
+			if numActive != 0 && be.State == loadbalancer.BackendStateTerminating {
+				// We can skip terminating backends since active backends exist.
+				continue
+			}
 
 			// The below is to make sure that UDP and SCTP are not allowed instead of comparing with lb.TCP
 			// The reason is to avoid extra dependencies with ongoing work to differentiate protocols in datapath,
 			// which might add more values such as lb.Any, lb.None, etc.
-			if be.Address.Protocol == loadbalancer.UDP || be.Address.Protocol == loadbalancer.SCTP {
+			if be.Address.Protocol() == loadbalancer.UDP || be.Address.Protocol() == loadbalancer.SCTP {
 				continue
 			}
 
@@ -488,9 +503,9 @@ func computeLoadAssignments(
 						Address: &envoy_config_core.Address{
 							Address: &envoy_config_core.Address_SocketAddress{
 								SocketAddress: &envoy_config_core.SocketAddress{
-									Address: be.Address.AddrCluster.String(),
+									Address: be.Address.AddrCluster().String(),
 									PortSpecifier: &envoy_config_core.SocketAddress_PortValue{
-										PortValue: uint32(be.Address.Port),
+										PortValue: uint32(be.Address.Port()),
 									},
 								},
 							},
@@ -518,4 +533,59 @@ func computeLoadAssignments(
 		}
 	}
 	return
+}
+
+// maxSyncWaitTime is the amount of time to wait for CECs to be synced to Envoy before
+// allowing endpoint regeneration to proceed. This is the maximum delay introduced by the
+// CEC processing to the initial endpoint generation.
+const maxSyncWaitTime = time.Minute
+
+// registerRegenerationWait registers initializer to block the endpoint regeneration
+// before we've reconciled to Envoy.
+func registerRegenerationWait(p cecControllerParams, fence regeneration.Fence) {
+	if !p.DaemonConfig.EnableL7Proxy || !p.DaemonConfig.EnableEnvoyConfig {
+		return
+	}
+	fence.Add("ciliumenvoyconfig", initWaitFunc(p))
+}
+
+func initWaitFunc(p cecControllerParams) hive.WaitFunc {
+	return func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, maxSyncWaitTime)
+		defer cancel()
+
+		// Wait until the table has been populated.
+		_, initWatch := p.EnvoyResources.Initialized(p.DB.ReadTxn())
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-initWatch:
+		}
+
+		// Wait for all initial resources to have been synced to Envoy.
+		seen := sets.New[EnvoyResourceName]()
+		for {
+			ers, watch := p.EnvoyResources.AllWatch(p.DB.ReadTxn())
+			done := true
+			for er := range ers {
+				if seen.Has(er.Name) {
+					continue
+				}
+				if er.Status.Kind == reconciler.StatusKindPending {
+					done = false
+					break
+				}
+				seen.Insert(er.Name)
+			}
+			if done {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-watch:
+			}
+		}
+		return nil
+	}
 }

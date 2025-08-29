@@ -14,7 +14,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/datapath"
 	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
-	"github.com/cilium/cilium/pkg/datapath/garp"
+	"github.com/cilium/cilium/pkg/datapath/gneigh"
 	"github.com/cilium/cilium/pkg/datapath/iptables/ipset"
 	"github.com/cilium/cilium/pkg/datapath/link"
 	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
@@ -32,9 +32,8 @@ import (
 	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/node/manager"
 	"github.com/cilium/cilium/pkg/promise"
-	"github.com/cilium/cilium/pkg/testutils/mockmaps"
 	"github.com/cilium/cilium/pkg/time"
-	wg "github.com/cilium/cilium/pkg/wireguard/agent"
+	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 // Cell provides a fake version of the datapath cell.
@@ -45,14 +44,10 @@ var Cell = cell.Module(
 	"Fake Datapath",
 
 	cell.Provide(
-		func(lifecycle cell.Lifecycle, na types.NodeAddressing, nodeManager manager.NodeManager) (types.NodeIDHandler, types.NodeHandler, types.NodeNeighbors, *fakeTypes.FakeNodeHandler) {
+		func(lifecycle cell.Lifecycle, na types.NodeAddressing, nodeManager manager.NodeManager) (types.NodeIDHandler, types.NodeHandler, *fakeTypes.FakeNodeHandler) {
 			fakeNodeHandler := fakeTypes.NewNodeHandler()
 			nodeManager.Subscribe(fakeNodeHandler)
-			return fakeNodeHandler, fakeNodeHandler, fakeNodeHandler, fakeNodeHandler
-		},
-		func(lifecycle cell.Lifecycle, na types.NodeAddressing, nodeManager manager.NodeManager) (types.LBMap, *mockmaps.LBMockMap) {
-			lbMap := mockmaps.NewLBMockMap()
-			return lbMap, lbMap
+			return fakeNodeHandler, fakeNodeHandler, fakeNodeHandler
 		},
 		func() signalmap.Map { return fakesignalmap.NewFakeSignalMap([][]byte{}, time.Second) },
 		func() authmap.Map { return fakeauthmap.NewFakeAuthMap() },
@@ -64,7 +59,8 @@ var Cell = cell.Module(
 		func() types.BandwidthManager { return &fakeTypes.BandwidthManager{} },
 		func() types.IPsecKeyCustodian { return &ipsecKeyCustodian{} },
 		func() mtu.MTU { return &fakeTypes.MTU{} },
-		func() *wg.Agent { return nil },
+		func() wgTypes.WireguardAgent { return &fakeTypes.WireguardAgent{} },
+		func() wgTypes.WireguardConfig { return &fakeTypes.WireguardConfig{} },
 		func() types.Loader { return &fakeTypes.FakeLoader{} },
 		func() types.Orchestrator { return &fakeTypes.FakeOrchestrator{} },
 		loader.NewCompilationLock,
@@ -72,8 +68,8 @@ var Cell = cell.Module(
 		func() (promise.Promise[nat.NatMap4], promise.Promise[nat.NatMap6]) {
 			r4, p4 := promise.New[nat.NatMap4]()
 			r6, p6 := promise.New[nat.NatMap6]()
-			r4.Reject(nat.MapDisabled)
-			r6.Reject(nat.MapDisabled)
+			r4.Reject(nat.ErrMapDisabled)
+			r6.Reject(nat.ErrMapDisabled)
 			return p4, p6
 		},
 
@@ -83,18 +79,12 @@ var Cell = cell.Module(
 
 		func() types.BigTCPConfig { return &fakeTypes.BigTCPUserConfig{} },
 
-		func() garp.L2PodAnnouncementConfig { return &fakeTypes.GarpConfig{} },
+		func() gneigh.L2PodAnnouncementConfig { return &fakeTypes.GNeighConfig{} },
 	),
 
 	tables.NodeAddressCell,
 	datapath.NodeAddressingCell,
 	tables.DirectRoutingDeviceCell,
-
-	cell.Invoke(
-		statedb.RegisterTable[*tables.Device],
-		statedb.RegisterTable[*tables.L2AnnounceEntry],
-		statedb.RegisterTable[*tables.Route],
-	),
 
 	tunnel.Cell,
 	cell.Provide(fakeDevices),

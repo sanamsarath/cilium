@@ -42,7 +42,7 @@ resolve_srcid_ipv6(struct __ctx_buff *ctx, struct ipv6hdr *ip6)
 	if (CONFIG(secctx_from_ipcache)) {
 		src = (union v6addr *)&ip6->saddr;
 		info = lookup_ip6_remote_endpoint(src, 0);
-		if (info && info->sec_identity)
+		if (info)
 			srcid = info->sec_identity;
 
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED6 : DBG_IP_ID_MAP_FAILED6,
@@ -112,7 +112,7 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 identity, __s8 *ext_err __maybe_unused
 	return TC_ACT_OK;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_FROM_WIREGUARD)
+__declare_tail(CILIUM_CALL_IPV6_FROM_WIREGUARD)
 int tail_handle_ipv6(struct __ctx_buff *ctx)
 {
 	__u32 src_sec_identity = ctx_load_and_clear_meta(ctx, CB_SRC_LABEL);
@@ -136,7 +136,7 @@ resolve_srcid_ipv4(struct __ctx_buff *ctx, struct iphdr *ip4)
 
 	if (CONFIG(secctx_from_ipcache)) {
 		info = lookup_ip4_remote_endpoint(ip4->saddr, 0);
-		if (info && info->sec_identity)
+		if (info)
 			srcid = info->sec_identity;
 
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED4 : DBG_IP_ID_MAP_FAILED4,
@@ -235,7 +235,7 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 identity, __s8 *ext_err __maybe_unused
 	return TC_ACT_OK;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4_FROM_WIREGUARD)
+__declare_tail(CILIUM_CALL_IPV4_FROM_WIREGUARD)
 int tail_handle_ipv4(struct __ctx_buff *ctx)
 {
 	__u32 src_sec_identity = ctx_load_and_clear_meta(ctx, CB_SRC_LABEL);
@@ -281,7 +281,7 @@ int cil_from_wireguard(struct __ctx_buff *ctx)
 
 		send_trace_notify(ctx, TRACE_FROM_CRYPTO, identity, UNKNOWN_ID,
 				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
-				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
+				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN, proto);
 
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV6_FROM_WIREGUARD, &ext_err);
 		/* See the equivalent v4 path for comments */
@@ -299,7 +299,7 @@ int cil_from_wireguard(struct __ctx_buff *ctx)
 
 		send_trace_notify(ctx, TRACE_FROM_CRYPTO, identity, UNKNOWN_ID,
 				  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
-				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
+				  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN, proto);
 
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV4_FROM_WIREGUARD, &ext_err);
 		/* We are not returning an error here to always allow traffic to
@@ -315,7 +315,7 @@ int cil_from_wireguard(struct __ctx_buff *ctx)
 
 	send_trace_notify(ctx, TRACE_FROM_CRYPTO, UNKNOWN_ID, UNKNOWN_ID,
 			  TRACE_EP_ID_UNKNOWN, ctx->ingress_ifindex,
-			  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN);
+			  TRACE_REASON_UNKNOWN, TRACE_PAYLOAD_LEN, proto);
 
 	/* Pass unknown traffic to the stack */
 	return TC_ACT_OK;
@@ -355,7 +355,7 @@ out:
 
 	send_trace_notify(ctx, TRACE_TO_CRYPTO, src_sec_identity, UNKNOWN_ID,
 			  TRACE_EP_ID_UNKNOWN, THIS_INTERFACE_IFINDEX,
-			  trace.reason, trace.monitor);
+			  trace.reason, trace.monitor, proto);
 
 	return TC_ACT_OK;
 }

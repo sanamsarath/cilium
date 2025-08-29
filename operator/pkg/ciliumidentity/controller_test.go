@@ -12,7 +12,6 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
-	"github.com/cilium/hive/job"
 	"github.com/google/go-cmp/cmp"
 	prometheustestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -22,11 +21,11 @@ import (
 
 	"github.com/cilium/cilium/operator/k8s"
 	cestest "github.com/cilium/cilium/operator/pkg/ciliumendpointslice/testutils"
+	cidtest "github.com/cilium/cilium/operator/pkg/ciliumidentity/testutils"
 	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/health/types"
 	capi_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	capi_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
-	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
@@ -111,7 +110,7 @@ func initHiveTest(t *testing.T, operatorManagingCID bool) (*resource.Resource[*c
 	var cidMetrics Metrics
 
 	h := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Provide(func() config {
@@ -130,12 +129,6 @@ func initHiveTest(t *testing.T, operatorManagingCID bool) (*resource.Resource[*c
 				EnableCiliumEndpointSlice: true,
 				DisableNetworkPolicy:      false,
 			}
-		}),
-		cell.Provide(func(lc cell.Lifecycle, p types.Provider, jr job.Registry) job.Group {
-			h := p.ForModule(cell.FullModuleID{"test"})
-			jg := jr.NewGroup(h)
-			lc.Append(jg)
-			return jg
 		}),
 		cell.Invoke(func(p params) error {
 			registerController(p)
@@ -162,11 +155,11 @@ func initHiveTest(t *testing.T, operatorManagingCID bool) (*resource.Resource[*c
 }
 
 func createNsAndPod(ctx context.Context, fakeClient *k8sClient.FakeClientset) error {
-	ns := testCreateNSObj("ns1", nil)
+	ns := cidtest.NewNamespace("ns1", nil)
 	if _, err := fakeClient.Slim().CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil {
 		return err
 	}
-	pod := testCreatePodObj("pod1", "ns1", testLbsA, nil)
+	pod := cidtest.NewPod("pod1", "ns1", testLbsA, "node1")
 	if _, err := fakeClient.Slim().CoreV1().Pods("ns1").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return err
 	}
@@ -215,14 +208,14 @@ func verifyCIDUsageInCES(ctx context.Context, fakeClient *k8sClient.FakeClientse
 }
 
 func TestCreateTwoPodsWithSameLabels(t *testing.T) {
-	ns1 := testCreateNSObj("ns1", nil)
+	ns1 := cidtest.NewNamespace("ns1", nil)
 
-	pod1 := testCreatePodObj("pod1", "ns1", testLbsA, nil)
-	pod2 := testCreatePodObj("pod2", "ns1", testLbsA, nil)
-	pod3 := testCreatePodObj("pod3", "ns1", testLbsB, nil)
+	pod1 := cidtest.NewPod("pod1", "ns1", testLbsA, "node1")
+	pod2 := cidtest.NewPod("pod2", "ns1", testLbsA, "node1")
+	pod3 := cidtest.NewPod("pod3", "ns1", testLbsB, "node1")
 
-	cid1 := testCreateCIDObjNs("1000", pod1, ns1)
-	cid2 := testCreateCIDObjNs("2000", pod3, ns1)
+	cid1 := cidtest.NewCIDWithNamespace("1000", pod1, ns1)
+	cid2 := cidtest.NewCIDWithNamespace("2000", pod3, ns1)
 
 	// Start test hive.
 	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
@@ -289,13 +282,13 @@ func TestCreateTwoPodsWithSameLabels(t *testing.T) {
 }
 
 func TestUpdatePodLabels(t *testing.T) {
-	ns1 := testCreateNSObj("ns1", nil)
+	ns1 := cidtest.NewNamespace("ns1", nil)
 
-	pod1 := testCreatePodObj("pod1", "ns1", testLbsA, nil)
-	pod1b := testCreatePodObj("pod1", "ns1", testLbsB, nil)
+	pod1 := cidtest.NewPod("pod1", "ns1", testLbsA, "node1")
+	pod1b := cidtest.NewPod("pod1", "ns1", testLbsB, "node1")
 
-	cid1 := testCreateCIDObjNs("1000", pod1, ns1)
-	cid2 := testCreateCIDObjNs("2000", pod1b, ns1)
+	cid1 := cidtest.NewCIDWithNamespace("1000", pod1, ns1)
+	cid2 := cidtest.NewCIDWithNamespace("2000", pod1b, ns1)
 
 	// Start test hive.
 	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
@@ -356,13 +349,13 @@ func TestUpdatePodLabels(t *testing.T) {
 }
 
 func TestUpdateUsedCIDIsReverted(t *testing.T) {
-	ns1 := testCreateNSObj("ns1", nil)
+	ns1 := cidtest.NewNamespace("ns1", nil)
 
-	pod1 := testCreatePodObj("pod1", "ns1", testLbsC, nil)
-	pod2 := testCreatePodObj("pod2", "ns1", testLbsB, nil)
+	pod1 := cidtest.NewPod("pod1", "ns1", testLbsC, "node1")
+	pod2 := cidtest.NewPod("pod2", "ns1", testLbsB, "node1")
 
-	cid1 := testCreateCIDObjNs("1000", pod1, ns1)
-	cid2 := testCreateCIDObjNs("2000", pod2, ns1)
+	cid1 := cidtest.NewCIDWithNamespace("1000", pod1, ns1)
+	cid2 := cidtest.NewCIDWithNamespace("2000", pod2, ns1)
 
 	// Start test hive.
 	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
@@ -440,9 +433,9 @@ func TestUpdateUsedCIDIsReverted(t *testing.T) {
 }
 
 func TestDeleteUsedCIDIsRecreated(t *testing.T) {
-	ns1 := testCreateNSObj("ns1", nil)
-	pod1 := testCreatePodObj("pod1", "ns1", testLbsC, nil)
-	cid1 := testCreateCIDObjNs("1000", pod1, ns1)
+	ns1 := cidtest.NewNamespace("ns1", nil)
+	pod1 := cidtest.NewPod("pod1", "ns1", testLbsC, "node1")
+	cid1 := cidtest.NewCIDWithNamespace("1000", pod1, ns1)
 
 	// Start test hive.
 	cidResource, _, fakeClient, _, h := initHiveTest(t, true)

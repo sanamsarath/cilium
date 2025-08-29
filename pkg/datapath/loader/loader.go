@@ -21,7 +21,6 @@ import (
 	"go4.org/netipx"
 
 	"github.com/cilium/cilium/pkg/bpf"
-	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/datapath/config"
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
@@ -37,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
+	"github.com/cilium/cilium/pkg/node/manager"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -78,22 +78,22 @@ type loader struct {
 	hostDpInitializedOnce sync.Once
 	hostDpInitialized     chan struct{}
 
-	sysctl          sysctl.Sysctl
-	prefilter       datapath.PreFilter
-	compilationLock datapath.CompilationLock
-	configWriter    datapath.ConfigWriter
-	nodeHandler     datapath.NodeHandler
+	sysctl             sysctl.Sysctl
+	prefilter          datapath.PreFilter
+	compilationLock    datapath.CompilationLock
+	configWriter       datapath.ConfigWriter
+	nodeConfigNotifier *manager.NodeConfigNotifier
 }
 
 type Params struct {
 	cell.In
 
-	Logger          *slog.Logger
-	Sysctl          sysctl.Sysctl
-	Prefilter       datapath.PreFilter
-	CompilationLock datapath.CompilationLock
-	ConfigWriter    datapath.ConfigWriter
-	NodeHandler     datapath.NodeHandler
+	Logger             *slog.Logger
+	Sysctl             sysctl.Sysctl
+	Prefilter          datapath.PreFilter
+	CompilationLock    datapath.CompilationLock
+	ConfigWriter       datapath.ConfigWriter
+	NodeConfigNotifier *manager.NodeConfigNotifier
 
 	// Force map initialisation before loader. You should not use these otherwise.
 	// Some of the entries in this slice may be nil.
@@ -103,14 +103,14 @@ type Params struct {
 // newLoader returns a new loader.
 func newLoader(p Params) *loader {
 	return &loader{
-		logger:            p.Logger,
-		templateCache:     newObjectCache(p.Logger, p.ConfigWriter, filepath.Join(option.Config.StateDir, defaults.TemplatesDir)),
-		sysctl:            p.Sysctl,
-		hostDpInitialized: make(chan struct{}),
-		prefilter:         p.Prefilter,
-		compilationLock:   p.CompilationLock,
-		configWriter:      p.ConfigWriter,
-		nodeHandler:       p.NodeHandler,
+		logger:             p.Logger,
+		templateCache:      newObjectCache(p.Logger, p.ConfigWriter, filepath.Join(option.Config.StateDir, defaults.TemplatesDir)),
+		sysctl:             p.Sysctl,
+		hostDpInitialized:  make(chan struct{}),
+		prefilter:          p.Prefilter,
+		compilationLock:    p.CompilationLock,
+		configWriter:       p.ConfigWriter,
+		nodeConfigNotifier: p.NodeConfigNotifier,
 	}
 }
 
@@ -198,12 +198,17 @@ func netdevRewrites(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeCo
 		ipv4, ipv6 := bpfMasqAddrs(link.Attrs().Name, lnc)
 
 		if option.Config.EnableIPv4Masquerade && ipv4.IsValid() {
-			cfg.NATIPv4Masquerade = byteorder.NetIPv4ToHost32(ipv4.AsSlice())
+			cfg.NATIPv4Masquerade = ipv4.As4()
 		}
 		if option.Config.EnableIPv6Masquerade && ipv6.IsValid() {
 			cfg.NATIPv6Masquerade = ipv6.As16()
 		}
+		// Masquerading IPv4 traffic from endpoints leaving the host.
+		cfg.EnableRemoteNodeMasquerade = option.Config.EnableRemoteNodeMasquerade
 	}
+
+	cfg.EnableExtendedIPProtocols = option.Config.EnableExtendedIPProtocols
+	cfg.HostEpID = uint16(lnc.HostEndpointID)
 
 	renames := map[string]string{
 		// Rename the calls map to include the device's ifindex.
@@ -345,6 +350,8 @@ func ciliumHostRewrites(ep datapath.EndpointConfiguration, lnc *datapath.LocalNo
 
 	cfg.SecurityLabel = ep.GetIdentity().Uint32()
 
+	cfg.HostEpID = uint16(lnc.HostEndpointID)
+
 	renames := map[string]string{
 		// Rename calls and policy maps to include the host endpoint's id.
 		"cilium_calls":     bpf.LocalMapName(callsmap.HostMapName, uint16(ep.GetID())),
@@ -365,7 +372,7 @@ func attachCiliumHost(logger *slog.Logger, ep datapath.Endpoint, lnc *datapath.L
 	co, renames := ciliumHostRewrites(ep, lnc)
 
 	var hostObj hostObjects
-	commit, err := bpf.LoadAndAssign(&hostObj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(logger, &hostObj, spec, &bpf.CollectionOptions{
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
 		},
@@ -417,8 +424,12 @@ func ciliumNetRewrites(ep datapath.EndpointConfiguration, lnc *datapath.LocalNod
 		cfg.SecctxFromIPCache = true
 	}
 
+	cfg.EnableExtendedIPProtocols = option.Config.EnableExtendedIPProtocols
+
 	ifindex := link.Attrs().Index
 	cfg.InterfaceIfindex = uint32(ifindex)
+
+	cfg.HostEpID = uint16(lnc.HostEndpointID)
 
 	renames := map[string]string{
 		// Rename the calls map to include cilium_net's ifindex.
@@ -440,7 +451,7 @@ func attachCiliumNet(logger *slog.Logger, ep datapath.Endpoint, lnc *datapath.Lo
 	co, renames := ciliumNetRewrites(ep, lnc, net)
 
 	var netObj hostNetObjects
-	commit, err := bpf.LoadAndAssign(&netObj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(logger, &netObj, spec, &bpf.CollectionOptions{
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
 		},
@@ -502,7 +513,7 @@ func attachNetworkDevices(logger *slog.Logger, ep datapath.Endpoint, lnc *datapa
 		co, renames := netdevRewrites(ep, lnc, iface)
 
 		var netdevObj hostNetdevObjects
-		commit, err := bpf.LoadAndAssign(&netdevObj, spec, &bpf.CollectionOptions{
+		commit, err := bpf.LoadAndAssign(logger, &netdevObj, spec, &bpf.CollectionOptions{
 			CollectionOptions: ebpf.CollectionOptions{
 				Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
 			},
@@ -520,7 +531,7 @@ func attachNetworkDevices(logger *slog.Logger, ep datapath.Endpoint, lnc *datapa
 			return fmt.Errorf("interface %s ingress: %w", device, err)
 		}
 
-		if option.Config.AreDevicesRequired() {
+		if option.Config.AreDevicesRequired(lnc.KPRConfig, lnc.EnableWireguard) {
 			// Attach cil_to_netdev to egress.
 			if err := attachSKBProgram(logger, iface, netdevObj.ToNetdev, symbolToHostNetdevEp,
 				linkDir, netlink.HANDLE_MIN_EGRESS, option.Config.EnableTCX); err != nil {
@@ -557,11 +568,11 @@ func attachNetworkDevices(logger *slog.Logger, ep datapath.Endpoint, lnc *datapa
 func endpointRewrites(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) (*config.BPFLXC, map[string]string) {
 	cfg := config.NewBPFLXC(nodeConfig(lnc))
 
+	if ep.IPv4Address().IsValid() {
+		cfg.EndpointIPv4 = ep.IPv4Address().As4()
+	}
 	if ep.IPv6Address().IsValid() {
 		cfg.EndpointIPv6 = ep.IPv6Address().As16()
-	}
-	if ipv4 := ep.IPv4Address().AsSlice(); ipv4 != nil {
-		cfg.EndpointIPv4 = byteorder.NetIPv4ToHost32(net.IP(ipv4))
 	}
 
 	// Netkit devices can be L2-less, meaning they operate with a zero MAC
@@ -580,6 +591,8 @@ func endpointRewrites(ep datapath.EndpointConfiguration, lnc *datapath.LocalNode
 	cfg.SecurityLabel = ep.GetIdentity().Uint32()
 
 	cfg.PolicyVerdictLogFilter = ep.GetPolicyVerdictLogFilter()
+
+	cfg.HostEpID = uint16(lnc.HostEndpointID)
 
 	renames := map[string]string{
 		// Rename the calls and policy maps to include the endpoint's id.
@@ -603,7 +616,7 @@ func reloadEndpoint(logger *slog.Logger, ep datapath.Endpoint, lnc *datapath.Loc
 	co, renames := endpointRewrites(ep, lnc)
 
 	var obj lxcObjects
-	commit, err := bpf.LoadAndAssign(&obj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(logger, &obj, spec, &bpf.CollectionOptions{
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
 		},
@@ -687,7 +700,7 @@ func replaceOverlayDatapath(ctx context.Context, logger *slog.Logger, lnc *datap
 		return fmt.Errorf("compiling overlay program: %w", err)
 	}
 
-	spec, err := bpf.LoadCollectionSpec(overlayObj)
+	spec, err := bpf.LoadCollectionSpec(logger, overlayObj)
 	if err != nil {
 		return fmt.Errorf("loading eBPF ELF %s: %w", overlayObj, err)
 	}
@@ -695,8 +708,10 @@ func replaceOverlayDatapath(ctx context.Context, logger *slog.Logger, lnc *datap
 	cfg := config.NewBPFOverlay(nodeConfig(lnc))
 	cfg.InterfaceIfindex = uint32(device.Attrs().Index)
 
+	cfg.EnableExtendedIPProtocols = option.Config.EnableExtendedIPProtocols
+
 	var obj overlayObjects
-	commit, err := bpf.LoadAndAssign(&obj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(logger, &obj, spec, &bpf.CollectionOptions{
 		Constants: cfg,
 		MapRenames: map[string]string{
 			"cilium_calls": fmt.Sprintf("cilium_calls_overlay_%d", identity.ReservedIdentityWorld),
@@ -732,7 +747,7 @@ func replaceWireguardDatapath(ctx context.Context, logger *slog.Logger, lnc *dat
 		return fmt.Errorf("compiling wireguard program: %w", err)
 	}
 
-	spec, err := bpf.LoadCollectionSpec(wireguardObj)
+	spec, err := bpf.LoadCollectionSpec(logger, wireguardObj)
 	if err != nil {
 		return fmt.Errorf("loading eBPF ELF %s: %w", wireguardObj, err)
 	}
@@ -744,8 +759,10 @@ func replaceWireguardDatapath(ctx context.Context, logger *slog.Logger, lnc *dat
 		cfg.SecctxFromIPCache = true
 	}
 
+	cfg.EnableExtendedIPProtocols = option.Config.EnableExtendedIPProtocols
+
 	var obj wireguardObjects
-	commit, err := bpf.LoadAndAssign(&obj, spec, &bpf.CollectionOptions{
+	commit, err := bpf.LoadAndAssign(logger, &obj, spec, &bpf.CollectionOptions{
 		Constants: cfg,
 		MapRenames: map[string]string{
 			"cilium_calls": fmt.Sprintf("cilium_calls_wireguard_%d", device.Attrs().Index),
@@ -761,7 +778,7 @@ func replaceWireguardDatapath(ctx context.Context, logger *slog.Logger, lnc *dat
 
 	linkDir := bpffsDeviceLinksDir(bpf.CiliumPath(), device)
 	// Attach/detach cil_to_wireguard to/from egress.
-	if option.Config.NeedEgressOnWireGuardDevice() {
+	if option.Config.NeedEgressOnWireGuardDevice(lnc.KPRConfig, lnc.EnableWireguard) {
 		if err := attachSKBProgram(logger, device, obj.ToWireguard, symbolToWireguard,
 			linkDir, netlink.HANDLE_MIN_EGRESS, option.Config.EnableTCX); err != nil {
 			return fmt.Errorf("interface %s egress: %w", device, err)
@@ -776,7 +793,7 @@ func replaceWireguardDatapath(ctx context.Context, logger *slog.Logger, lnc *dat
 		}
 	}
 	// Attach/detach cil_from_wireguard to/from ingress.
-	if option.Config.NeedIngressOnWireGuardDevice() {
+	if option.Config.NeedIngressOnWireGuardDevice(lnc.KPRConfig, lnc.EnableWireguard) {
 		if err := attachSKBProgram(logger, device, obj.FromWireguard, symbolFromWireguard,
 			linkDir, netlink.HANDLE_MIN_INGRESS, option.Config.EnableTCX); err != nil {
 			return fmt.Errorf("interface %s ingress: %w", device, err)
@@ -918,13 +935,13 @@ func (l *loader) EndpointHash(cfg datapath.EndpointConfiguration, lnCfg *datapat
 
 // CallsMapPath gets the BPF Calls Map for the endpoint with the specified ID.
 func (l *loader) CallsMapPath(id uint16) string {
-	return bpf.LocalMapPath(callsmap.MapName, id)
+	return bpf.LocalMapPath(l.logger, callsmap.MapName, id)
 }
 
 // CustomCallsMapPath gets the BPF Custom Calls Map for the endpoint with the
 // specified ID.
 func (l *loader) CustomCallsMapPath(id uint16) string {
-	return bpf.LocalMapPath(callsmap.CustomCallsMapName, id)
+	return bpf.LocalMapPath(l.logger, callsmap.CustomCallsMapName, id)
 }
 
 // HostDatapathInitialized returns a channel which is closed when the

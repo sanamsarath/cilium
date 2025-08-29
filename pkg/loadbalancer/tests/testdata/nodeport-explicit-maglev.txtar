@@ -1,4 +1,4 @@
-#! --enable-experimental-lb --bpf-lb-algorithm-annotation --lb-test-fault-probability=0.0
+#! --bpf-lb-algorithm-annotation --lb-test-fault-probability=0.0
 
 # Add some node addresses
 db/insert node-addresses addrv4.yaml
@@ -6,11 +6,6 @@ db/cmp node-addresses nodeaddrs.table
 
 # Start the test application
 hive start
-
-# Wait for tables to initialize (e.g. reflector to start) before adding more objects.
-# (otherwise might miss events due to List() vs Watch() race in fake client).
-# NOTE: The 100ms delay you might see is from WaitForCacheSync polling at 100ms.
-db/initialized
 
 # Add the first service and endpoints
 k8s/add endpointslice.yaml
@@ -108,23 +103,26 @@ BE: ID=6 ADDR=10.244.2.2:80/TCP STATE=active
 BE: ID=7 ADDR=10.244.2.3:80/TCP STATE=active
 BE: ID=8 ADDR=10.244.2.4:80/TCP STATE=active
 MAGLEV: ID=5 INNER=[5(256), 6(255), 7(255), 8(255)]
+MAGLEV: ID=6 INNER=[5(256), 6(255), 7(255), 8(255)]
 REV: ID=1 ADDR=0.0.0.0:30781
 REV: ID=2 ADDR=1.1.1.1:30781
 REV: ID=3 ADDR=10.96.50.104:80
 REV: ID=4 ADDR=0.0.0.0:30782
 REV: ID=5 ADDR=1.1.1.1:30782
 REV: ID=6 ADDR=10.96.50.105:80
-SVC: ID=1 ADDR=0.0.0.0:30781/TCP SLOT=0 LBALG=random AFFTimeout=0 COUNT=4 QCOUNT=0 FLAGS=NodePort+non-routable
+SVC: ID=0 ADDR=10.96.50.104:0/ANY SLOT=0 LBALG=undef AFFTimeout=0 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
+SVC: ID=0 ADDR=10.96.50.105:0/ANY SLOT=0 LBALG=undef AFFTimeout=0 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
+SVC: ID=1 ADDR=0.0.0.0:30781/TCP SLOT=0 LBALG=undef AFFTimeout=0 COUNT=4 QCOUNT=0 FLAGS=NodePort+non-routable
 SVC: ID=1 ADDR=0.0.0.0:30781/TCP SLOT=1 BEID=1 COUNT=0 QCOUNT=0 FLAGS=NodePort+non-routable
 SVC: ID=1 ADDR=0.0.0.0:30781/TCP SLOT=2 BEID=2 COUNT=0 QCOUNT=0 FLAGS=NodePort+non-routable
 SVC: ID=1 ADDR=0.0.0.0:30781/TCP SLOT=3 BEID=3 COUNT=0 QCOUNT=0 FLAGS=NodePort+non-routable
 SVC: ID=1 ADDR=0.0.0.0:30781/TCP SLOT=4 BEID=4 COUNT=0 QCOUNT=0 FLAGS=NodePort+non-routable
-SVC: ID=2 ADDR=1.1.1.1:30781/TCP SLOT=0 LBALG=random AFFTimeout=0 COUNT=4 QCOUNT=0 FLAGS=NodePort
+SVC: ID=2 ADDR=1.1.1.1:30781/TCP SLOT=0 LBALG=undef AFFTimeout=0 COUNT=4 QCOUNT=0 FLAGS=NodePort
 SVC: ID=2 ADDR=1.1.1.1:30781/TCP SLOT=1 BEID=1 COUNT=0 QCOUNT=0 FLAGS=NodePort
 SVC: ID=2 ADDR=1.1.1.1:30781/TCP SLOT=2 BEID=2 COUNT=0 QCOUNT=0 FLAGS=NodePort
 SVC: ID=2 ADDR=1.1.1.1:30781/TCP SLOT=3 BEID=3 COUNT=0 QCOUNT=0 FLAGS=NodePort
 SVC: ID=2 ADDR=1.1.1.1:30781/TCP SLOT=4 BEID=4 COUNT=0 QCOUNT=0 FLAGS=NodePort
-SVC: ID=3 ADDR=10.96.50.104:80/TCP SLOT=0 LBALG=random AFFTimeout=0 COUNT=4 QCOUNT=0 FLAGS=ClusterIP+non-routable
+SVC: ID=3 ADDR=10.96.50.104:80/TCP SLOT=0 LBALG=undef AFFTimeout=0 COUNT=4 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=3 ADDR=10.96.50.104:80/TCP SLOT=1 BEID=1 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=3 ADDR=10.96.50.104:80/TCP SLOT=2 BEID=2 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable
 SVC: ID=3 ADDR=10.96.50.104:80/TCP SLOT=3 BEID=3 COUNT=0 QCOUNT=0 FLAGS=ClusterIP+non-routable

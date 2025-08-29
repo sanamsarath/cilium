@@ -4,8 +4,9 @@
 package maps
 
 import (
+	"log/slog"
+
 	"github.com/cilium/hive/cell"
-	"github.com/sirupsen/logrus"
 
 	daemonapi "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/pkg/maps/act"
@@ -15,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/ctmap/gc"
 	"github.com/cilium/cilium/pkg/maps/egressmap"
 	"github.com/cilium/cilium/pkg/maps/l2respondermap"
+	"github.com/cilium/cilium/pkg/maps/l2v6respondermap"
 	"github.com/cilium/cilium/pkg/maps/multicast"
 	"github.com/cilium/cilium/pkg/maps/nat"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
@@ -49,8 +51,9 @@ var Cell = cell.Module(
 	// Provides the node map which contains information about node IDs and their IP addresses.
 	nodemap.Cell,
 
-	// Provides access to the L2 responder map.
+	// Provides access to the L2 responder maps.
 	l2respondermap.Cell,
+	l2v6respondermap.Cell,
 
 	// Provides access to the multicast maps.
 	multicast.Cell,
@@ -80,10 +83,10 @@ type mapApiHandlerOut struct {
 	GetMapNameEventsHandler daemonapi.GetMapNameEventsHandler
 }
 
-func newMapApiHandler(logger logrus.FieldLogger) mapApiHandlerOut {
+func newMapApiHandler(logger *slog.Logger) mapApiHandlerOut {
 	return mapApiHandlerOut{
 		GetMapHandler:           &getMapHandler{},
-		GetMapNameHandler:       &getMapNameHandler{},
-		GetMapNameEventsHandler: &getMapNameEventsHandler{logger: logger, mapGetter: &mapGetterImpl{}},
+		GetMapNameHandler:       &getMapNameHandler{logger: logger},
+		GetMapNameEventsHandler: &getMapNameEventsHandler{logger: logger, mapGetter: &mapGetterImpl{logger: logger}},
 	}
 }

@@ -17,10 +17,11 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
 	mcsapitypes "github.com/cilium/cilium/pkg/clustermesh/mcsapi/types"
+	serviceStore "github.com/cilium/cilium/pkg/clustermesh/store"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
+	"github.com/cilium/cilium/pkg/dial"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	serviceStore "github.com/cilium/cilium/pkg/service/store"
 )
 
 // clusterMesh is a cache of multiple remote clusters
@@ -107,12 +108,18 @@ func newClusterMesh(lc cell.Lifecycle, params clusterMeshParams) (*clusterMesh, 
 		syncTimeoutConfig: params.TimeoutConfig,
 	}
 	cm.common = common.NewClusterMesh(common.Configuration{
-		Logger:           params.Logger,
-		Config:           params.Config,
-		ClusterInfo:      params.ClusterInfo,
-		NewRemoteCluster: cm.newRemoteCluster,
-		ServiceResolver:  params.ServiceResolver,
-		Metrics:          params.CommonMetrics,
+		Logger:              params.Logger,
+		Config:              params.Config,
+		ClusterInfo:         params.ClusterInfo,
+		RemoteClientFactory: params.RemoteClientFactory,
+		NewRemoteCluster:    cm.newRemoteCluster,
+		Resolvers: func() (out []dial.Resolver) {
+			if params.ServiceResolver != nil {
+				out = append(out, params.ServiceResolver)
+			}
+			return out
+		}(),
+		Metrics: params.CommonMetrics,
 	})
 
 	lc.Append(cm.common)
@@ -184,7 +191,7 @@ func (cm *clusterMesh) GlobalServiceExports() *GlobalServiceExportCache {
 
 func (cm *clusterMesh) newRemoteCluster(name string, status common.StatusFunc) common.RemoteCluster {
 	rc := &remoteCluster{
-		logger:                        cm.logger,
+		logger:                        cm.logger.With(logfields.ClusterName, name),
 		name:                          name,
 		clusterMeshEnableEndpointSync: cm.cfg.ClusterMeshEnableEndpointSync,
 		clusterMeshEnableMCSAPI:       cm.cfgMCSAPI.ClusterMeshEnableMCSAPI,
@@ -202,7 +209,7 @@ func (cm *clusterMesh) newRemoteCluster(name string, status common.StatusFunc) c
 			serviceStore.NamespacedNameValidator(),
 		),
 		common.NewSharedServicesObserver(
-			cm.logger.With(logfields.ClusterName, name),
+			rc.logger,
 			cm.globalServices,
 			func(svc *serviceStore.ClusterService) {
 				for _, hook := range cm.clusterServiceUpdateHooks {

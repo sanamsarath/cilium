@@ -17,7 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/hive"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
-	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/metrics"
 )
@@ -25,12 +25,12 @@ import (
 func TestReconcileCreate(t *testing.T) {
 	var r *reconciler
 	var fakeClient *k8sClient.FakeClientset
-	m := newCESManager(2, hivetest.Logger(t)).(*cesManager)
+	m := newCESManager(2, hivetest.Logger(t))
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	var cesMetrics *Metrics
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Invoke(func(
@@ -84,12 +84,12 @@ func TestReconcileCreate(t *testing.T) {
 func TestReconcileUpdate(t *testing.T) {
 	var r *reconciler
 	var fakeClient *k8sClient.FakeClientset
-	m := newCESManager(2, hivetest.Logger(t)).(*cesManager)
+	m := newCESManager(2, hivetest.Logger(t))
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	var cesMetrics *Metrics
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Invoke(func(
@@ -149,12 +149,12 @@ func TestReconcileUpdate(t *testing.T) {
 func TestReconcileDelete(t *testing.T) {
 	var r *reconciler
 	var fakeClient *k8sClient.FakeClientset
-	m := newCESManager(2, hivetest.Logger(t)).(*cesManager)
+	m := newCESManager(2, hivetest.Logger(t))
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	var cesMetrics *Metrics
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Invoke(func(
@@ -208,12 +208,12 @@ func TestReconcileDelete(t *testing.T) {
 func TestReconcileNoop(t *testing.T) {
 	var r *reconciler
 	var fakeClient *k8sClient.FakeClientset
-	m := newCESManager(2, hivetest.Logger(t)).(*cesManager)
+	m := newCESManager(2, hivetest.Logger(t))
 	var ciliumEndpoint resource.Resource[*cilium_v2.CiliumEndpoint]
 	var ciliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	var cesMetrics *Metrics
 	hive := hive.New(
-		k8sClient.FakeClientCell,
+		k8sClient.FakeClientCell(),
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Invoke(func(

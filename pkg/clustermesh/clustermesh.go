@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
+	serviceStore "github.com/cilium/cilium/pkg/clustermesh/store"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
 	"github.com/cilium/cilium/pkg/dial"
@@ -25,7 +26,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeStore "github.com/cilium/cilium/pkg/node/store"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
-	serviceStore "github.com/cilium/cilium/pkg/service/store"
 	"github.com/cilium/cilium/pkg/source"
 )
 
@@ -41,6 +41,9 @@ type Configuration struct {
 
 	// ClusterInfo is the id/name of the local cluster. This is used for logging and metrics
 	ClusterInfo cmtypes.ClusterInfo
+
+	// RemoteClientFactory is the factory to create new backend instances.
+	RemoteClientFactory common.RemoteClientFactoryFn
 
 	// ServiceMerger is the interface responsible to merge service and
 	// endpoints into an existing cache
@@ -60,6 +63,9 @@ type Configuration struct {
 
 	// ServiceResolver, if not nil, is used to create a custom dialer for service resolution.
 	ServiceResolver *dial.ServiceResolver
+
+	// ServiceBackendResolver, if not nil, is used to perform service to backend resolution.
+	ServiceBackendResolver *dial.ServiceBackendResolver
 
 	// IPCacheWatcherExtraOpts returns extra options for watching ipcache entries.
 	IPCacheWatcherExtraOpts IPCacheWatcherOptsFn `optional:"true"`
@@ -141,8 +147,18 @@ func NewClusterMesh(lifecycle cell.Lifecycle, c Configuration) *ClusterMesh {
 		Logger:                       c.Logger,
 		Config:                       c.Config,
 		ClusterInfo:                  c.ClusterInfo,
+		RemoteClientFactory:          c.RemoteClientFactory,
 		ClusterSizeDependantInterval: c.ClusterSizeDependantInterval,
-		ServiceResolver:              c.ServiceResolver,
+
+		Resolvers: func() (out []dial.Resolver) {
+			if c.ServiceResolver != nil {
+				out = append(out, c.ServiceResolver)
+			}
+			if c.ServiceBackendResolver != nil {
+				out = append(out, c.ServiceBackendResolver)
+			}
+			return out
+		}(),
 
 		NewRemoteCluster: cm.NewRemoteCluster,
 
@@ -190,17 +206,14 @@ func (cm *ClusterMesh) NewRemoteCluster(name string, status common.StatusFunc) c
 		common.NewSharedServicesObserver(
 			rc.log,
 			cm.globalServices,
-			func(svc *serviceStore.ClusterService) {
-				cm.conf.ServiceMerger.MergeExternalServiceUpdate(svc, rc.synced.services)
-			},
-			func(svc *serviceStore.ClusterService) {
-				cm.conf.ServiceMerger.MergeExternalServiceDelete(svc, rc.synced.services)
-			},
+			cm.conf.ServiceMerger.MergeExternalServiceUpdate,
+			cm.conf.ServiceMerger.MergeExternalServiceDelete,
 		),
-		store.RWSWithOnSyncCallback(func(ctx context.Context) { rc.synced.services.Stop() }),
+		store.RWSWithOnSyncCallback(func(ctx context.Context) { close(rc.synced.services) }),
 	)
 
 	rc.ipCacheWatcher = ipcache.NewIPIdentityWatcher(
+		cm.conf.Logger,
 		name, cm.conf.IPCache, cm.conf.StoreFactory, source.ClusterMesh,
 		store.RWSWithOnSyncCallback(func(ctx context.Context) { close(rc.synced.ipcache) }),
 	)

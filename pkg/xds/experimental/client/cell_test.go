@@ -13,7 +13,7 @@ import (
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
 
-	discoverypb "github.com/cilium/proxy/go/envoy/service/discovery/v3"
+	discoverypb "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	core_v1 "k8s.io/api/core/v1"
 )
 
@@ -24,7 +24,7 @@ func TestCell_SuccessfullyRunClient(t *testing.T) {
 	h := hive.New(
 		cell.Provide(NewDefaultNodeProvider),
 		cell.Provide(NewInsecureGRPCOptionsProvider),
-		node.LocalNodeStoreCell,
+		node.LocalNodeStoreTestCell,
 		Cell,
 		cell.Invoke(func(localNodeStore *node.LocalNodeStore) {
 			localNodeStore.Update(func(n *node.LocalNode) {
@@ -84,7 +84,7 @@ func TestCell_NoServerProvided(t *testing.T) {
 	h := hive.New(
 		cell.Provide(NewDefaultNodeProvider),
 		cell.Provide(NewInsecureGRPCOptionsProvider),
-		node.LocalNodeStoreCell,
+		node.LocalNodeStoreTestCell,
 		Cell,
 		cell.Invoke(func(localNodeStore *node.LocalNodeStore) {
 			localNodeStore.Update(func(n *node.LocalNode) {

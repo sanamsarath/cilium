@@ -23,6 +23,7 @@ import (
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/k8s/types"
+	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
@@ -45,6 +46,7 @@ type params struct {
 	CiliumEndpoint      resource.Resource[*types.CiliumEndpoint]
 	CiliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	Clientset           k8sClient.Clientset
+	KVStoreClient       kvstore.Client
 	RestorerPromise     promise.Promise[endpointstate.Restorer]
 	EndpointsCache      localEndpointCache
 	Cfg                 Config
@@ -72,7 +74,7 @@ func registerCleanup(p params) {
 		// instead eventually deleted when the corresponding lease expires.
 		//
 		// [1]: cilium/cilium#20350
-		p.DaemonCfg.KVstoreEnabled() {
+		p.KVStoreClient.IsEnabled() {
 		p.Logger.Info("Init procedure to clean up stale CiliumEndpoint disabled")
 		return
 	}
@@ -149,12 +151,12 @@ func (c *cleanup) cleanStaleCEPs(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get CiliumEndpoint store: %w", err)
 	}
-	objs, err := store.ByIndex("localNode", node.GetCiliumEndpointNodeIP())
+	objs, err := store.ByIndex("localNode", node.GetCiliumEndpointNodeIP(c.log))
 	if err != nil {
 		return fmt.Errorf("failed to get indexed CiliumEndpointSlice from store: %w", err)
 	}
 	for _, cep := range objs {
-		if cep.Networking.NodeIP == node.GetCiliumEndpointNodeIP() && c.endpointsCache.LookupCEPName(cep.Namespace+"/"+cep.Name) == nil {
+		if cep.Networking.NodeIP == node.GetCiliumEndpointNodeIP(c.log) && c.endpointsCache.LookupCEPName(cep.Namespace+"/"+cep.Name) == nil {
 			if err := c.deleteCiliumEndpoint(ctx, cep.Namespace, cep.Name, &cep.ObjectMeta.UID); err != nil {
 				errs = errors.Join(errs, err)
 			}
@@ -169,13 +171,13 @@ func (c *cleanup) cleanStaleCESs(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get CiliumEndpointSlice store: %w", err)
 	}
-	objs, err := store.ByIndex("localNode", node.GetCiliumEndpointNodeIP())
+	objs, err := store.ByIndex("localNode", node.GetCiliumEndpointNodeIP(c.log))
 	if err != nil {
 		return fmt.Errorf("failed to get indexed CiliumEndpointSlice from store: %w", err)
 	}
 	for _, ces := range objs {
 		for _, cep := range ces.Endpoints {
-			if cep.Networking.NodeIP == node.GetCiliumEndpointNodeIP() && c.endpointsCache.LookupCEPName(ces.Namespace+"/"+cep.Name) == nil {
+			if cep.Networking.NodeIP == node.GetCiliumEndpointNodeIP(c.log) && c.endpointsCache.LookupCEPName(ces.Namespace+"/"+cep.Name) == nil {
 				if err := c.deleteCiliumEndpoint(ctx, ces.Namespace, cep.Name, nil); err != nil {
 					errs = errors.Join(errs, err)
 				}
@@ -212,7 +214,7 @@ func (c *cleanup) deleteCiliumEndpoint(ctx context.Context, cepNamespace, cepNam
 			)
 			return resiliency.Retryable(err)
 		}
-		if cep.Status.Networking.NodeIP != node.GetCiliumEndpointNodeIP() {
+		if cep.Status.Networking.NodeIP != node.GetCiliumEndpointNodeIP(c.log) {
 			scopedLogger.Debug(
 				"Stale CEP fetched apiserver no longer references this Node, skipping.",
 				logfields.Error, err,

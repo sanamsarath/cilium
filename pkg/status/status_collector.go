@@ -23,11 +23,10 @@ import (
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/identity"
 	k8smetrics "github.com/cilium/cilium/pkg/k8s/metrics"
-	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	ipmasqmap "github.com/cilium/cilium/pkg/maps/ipmasq"
-	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
 	"github.com/cilium/cilium/pkg/maps/ratelimitmap"
@@ -276,12 +275,9 @@ func (d *statusCollector) getCNIChainingStatus() *models.CNIChainingStatus {
 }
 
 func (d *statusCollector) getKubeProxyReplacementStatus(ctx context.Context) *models.KubeProxyReplacement {
-	var mode string
-	switch d.statusParams.DaemonConfig.KubeProxyReplacement {
-	case option.KubeProxyReplacementTrue:
+	mode := models.KubeProxyReplacementModeFalse
+	if d.statusParams.KPRConfig.KubeProxyReplacement {
 		mode = models.KubeProxyReplacementModeTrue
-	case option.KubeProxyReplacementFalse:
-		mode = models.KubeProxyReplacementModeFalse
 	}
 
 	devices, _ := datapathTables.SelectedDevices(d.statusParams.Devices, d.statusParams.DB.ReadTxn())
@@ -307,50 +303,46 @@ func (d *statusCollector) getKubeProxyReplacementStatus(ctx context.Context) *mo
 		Nat46X64:              &models.KubeProxyReplacementFeaturesNat46X64{},
 		BpfSocketLBHostnsOnly: d.statusParams.DaemonConfig.BPFSocketLBHostnsOnly,
 	}
-	if d.statusParams.DaemonConfig.EnableNodePort {
+	if d.statusParams.KPRConfig.EnableNodePort {
 		features.NodePort.Enabled = true
-		features.NodePort.Mode = strings.ToUpper(d.statusParams.DaemonConfig.NodePortMode)
-		switch d.statusParams.DaemonConfig.LoadBalancerDSRDispatch {
-		case option.DSRDispatchIPIP:
+		features.NodePort.Mode = strings.ToUpper(d.statusParams.LBConfig.LBMode)
+		switch d.statusParams.LBConfig.DSRDispatch {
+		case loadbalancer.DSRDispatchIPIP:
 			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeIPIP
-		case option.DSRDispatchOption:
+		case loadbalancer.DSRDispatchOption:
 			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeIPOptionExtension
-		case option.DSRDispatchGeneve:
+		case loadbalancer.DSRDispatchGeneve:
 			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeGeneve
 		}
-		if d.statusParams.DaemonConfig.NodePortMode == option.NodePortModeHybrid {
+		if d.statusParams.LBConfig.LBMode == loadbalancer.LBModeHybrid {
 			//nolint:staticcheck
-			features.NodePort.Mode = strings.Title(d.statusParams.DaemonConfig.NodePortMode)
+			features.NodePort.Mode = strings.Title(d.statusParams.LBConfig.LBMode)
 		}
 		features.NodePort.Algorithm = models.KubeProxyReplacementFeaturesNodePortAlgorithmRandom
-		if d.statusParams.DaemonConfig.NodePortAlg == option.NodePortAlgMaglev {
+		if d.statusParams.LBConfig.LBAlgorithm == loadbalancer.LBAlgorithmMaglev {
 			features.NodePort.Algorithm = models.KubeProxyReplacementFeaturesNodePortAlgorithmMaglev
-			features.NodePort.LutSize = int64(d.statusParams.MaglevConfig.MaglevTableSize)
+			features.NodePort.LutSize = int64(d.statusParams.MaglevConfig.TableSize)
 		}
-		if d.statusParams.DaemonConfig.LoadBalancerAlgorithmAnnotation {
-			features.NodePort.LutSize = int64(d.statusParams.MaglevConfig.MaglevTableSize)
+		if d.statusParams.LBConfig.AlgorithmAnnotation {
+			features.NodePort.LutSize = int64(d.statusParams.MaglevConfig.TableSize)
 		}
 		if d.statusParams.DaemonConfig.NodePortAcceleration == option.NodePortAccelerationGeneric {
 			features.NodePort.Acceleration = models.KubeProxyReplacementFeaturesNodePortAccelerationGeneric
 		} else {
 			features.NodePort.Acceleration = strings.Title(d.statusParams.DaemonConfig.NodePortAcceleration)
 		}
-		features.NodePort.PortMin = int64(d.statusParams.DaemonConfig.NodePortMin)
-		features.NodePort.PortMax = int64(d.statusParams.DaemonConfig.NodePortMax)
+		features.NodePort.PortMin = int64(d.statusParams.LBConfig.NodePortMin)
+		features.NodePort.PortMax = int64(d.statusParams.LBConfig.NodePortMax)
 	}
-	if d.statusParams.DaemonConfig.EnableHostPort {
+	if d.statusParams.KPRConfig.KubeProxyReplacement {
 		features.HostPort.Enabled = true
-	}
-	if d.statusParams.DaemonConfig.EnableExternalIPs {
 		features.ExternalIPs.Enabled = true
 	}
-	if d.statusParams.DaemonConfig.EnableSocketLB {
+	if d.statusParams.KPRConfig.EnableSocketLB {
 		features.SocketLB.Enabled = true
 		features.SocketLBTracing.Enabled = true
 	}
-	if d.statusParams.DaemonConfig.EnableSessionAffinity {
-		features.SessionAffinity.Enabled = true
-	}
+	features.SessionAffinity.Enabled = true
 	if d.statusParams.DaemonConfig.NodePortNat46X64 || d.statusParams.DaemonConfig.EnableNat46X64Gateway {
 		features.Nat46X64.Enabled = true
 		gw := &models.KubeProxyReplacementFeaturesNat46X64Gateway{
@@ -367,20 +359,18 @@ func (d *statusCollector) getKubeProxyReplacementStatus(ctx context.Context) *mo
 		}
 		features.Nat46X64.Service = svc
 	}
-	if d.statusParams.DaemonConfig.EnableNodePort {
-		if d.statusParams.DaemonConfig.LoadBalancerAlgorithmAnnotation {
+	if d.statusParams.KPRConfig.EnableNodePort {
+		if d.statusParams.LBConfig.AlgorithmAnnotation {
 			features.Annotations = append(features.Annotations, annotation.ServiceLoadBalancingAlgorithm)
 		}
-		if d.statusParams.DaemonConfig.LoadBalancerModeAnnotation {
+		if d.statusParams.LBConfig.LBModeAnnotation {
 			features.Annotations = append(features.Annotations, annotation.ServiceForwardingMode)
 		}
 		features.Annotations = append(features.Annotations, annotation.ServiceNodeExposure)
 		features.Annotations = append(features.Annotations, annotation.ServiceNodeSelectorExposure)
 		features.Annotations = append(features.Annotations, annotation.ServiceTypeExposure)
 		features.Annotations = append(features.Annotations, annotation.ServiceProxyDelegation)
-		if d.statusParams.DaemonConfig.EnableSVCSourceRangeCheck {
-			features.Annotations = append(features.Annotations, annotation.ServiceSourceRangesPolicy)
-		}
+		features.Annotations = append(features.Annotations, annotation.ServiceSourceRangesPolicy)
 		sort.Strings(features.Annotations)
 	}
 
@@ -444,27 +434,27 @@ func (d *statusCollector) getBPFMapStatus() *models.BPFMapStatus {
 			},
 			{
 				Name: "IPv4 service", // cilium_lb4_services_v2
-				Size: int64(lbmap.ServiceMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBServiceMapEntries),
 			},
 			{
 				Name: "IPv6 service", // cilium_lb6_services_v2
-				Size: int64(lbmap.ServiceMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBServiceMapEntries),
 			},
 			{
 				Name: "IPv4 service backend", // cilium_lb4_backends_v2
-				Size: int64(lbmap.ServiceBackEndMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBBackendMapEntries),
 			},
 			{
 				Name: "IPv6 service backend", // cilium_lb6_backends_v2
-				Size: int64(lbmap.ServiceBackEndMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBBackendMapEntries),
 			},
 			{
 				Name: "IPv4 service reverse NAT", // cilium_lb4_reverse_nat
-				Size: int64(lbmap.RevNatMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBRevNatEntries),
 			},
 			{
 				Name: "IPv6 service reverse NAT", // cilium_lb6_reverse_nat
-				Size: int64(lbmap.RevNatMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBRevNatEntries),
 			},
 			{
 				Name: "Metrics",
@@ -492,11 +482,11 @@ func (d *statusCollector) getBPFMapStatus() *models.BPFMapStatus {
 			},
 			{
 				Name: "Session affinity",
-				Size: int64(lbmap.AffinityMapMaxEntries),
+				Size: int64(d.statusParams.LBConfig.LBAffinityMapEntries),
 			},
 			{
 				Name: "Sock reverse NAT",
-				Size: int64(d.statusParams.DaemonConfig.SockRevNatEntries),
+				Size: int64(d.statusParams.LBConfig.LBSockRevNatEntries),
 			},
 		},
 	}
@@ -654,10 +644,10 @@ func (d *statusCollector) getProbes() []Probe {
 		{
 			Name: "kvstore",
 			Probe: func(ctx context.Context) (any, error) {
-				if d.statusParams.DaemonConfig.KVStore == "" {
+				if !d.statusParams.KVStoreClient.IsEnabled() {
 					return &models.Status{State: models.StatusStateDisabled}, nil
 				} else {
-					return kvstore.Client().Status(), nil
+					return d.statusParams.KVStoreClient.Status(), nil
 				}
 			},
 			OnStatusUpdate: func(status Status) {
@@ -881,6 +871,25 @@ func (d *statusCollector) getProbes() []Probe {
 			},
 		},
 		{
+			Name: "hubble-metrics",
+			Probe: func(ctx context.Context) (any, error) {
+				if d.statusParams.HubbleMetrics == nil {
+					return &models.HubbleMetricsStatus{State: models.HubbleMetricsStatusStateDisabled}, nil
+				}
+				return d.statusParams.HubbleMetrics.Status(), nil
+			},
+			OnStatusUpdate: func(status Status) {
+				d.statusCollectMutex.Lock()
+				defer d.statusCollectMutex.Unlock()
+
+				if status.Err == nil {
+					if s, ok := status.Data.(*models.HubbleMetricsStatus); ok {
+						d.statusResponse.HubbleMetrics = s
+					}
+				}
+			},
+		},
+		{
 			Name: "encryption",
 			Probe: func(ctx context.Context) (any, error) {
 				switch {
@@ -888,7 +897,7 @@ func (d *statusCollector) getProbes() []Probe {
 					return &models.EncryptionStatus{
 						Mode: models.EncryptionStatusModeIPsec,
 					}, nil
-				case d.statusParams.DaemonConfig.EnableWireguard:
+				case d.statusParams.WireguardAgent.Enabled():
 					var msg string
 					status, err := d.statusParams.WireguardAgent.Status(false)
 					if err != nil {

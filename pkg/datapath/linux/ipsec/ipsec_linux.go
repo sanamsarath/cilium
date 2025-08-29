@@ -7,6 +7,7 @@ package ipsec
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -22,7 +23,6 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
-	"github.com/fsnotify/fsnotify"
 	"github.com/prometheus/procfs"
 	"github.com/vishvananda/netlink"
 
@@ -687,6 +687,10 @@ func matchesOnNodeID(mark *netlink.XfrmMark) bool {
 		mark.Mask&linux_defaults.IPsecMarkMaskNodeID == linux_defaults.IPsecMarkMaskNodeID
 }
 
+func matchesOnDst(a *net.IPNet, b *net.IPNet) bool {
+	return a.IP.Equal(b.IP) && bytes.Equal(a.Mask, b.Mask)
+}
+
 func ipsecDeleteXfrmState(log *slog.Logger, nodeID uint16) error {
 	scopedLog := log.With(
 		logfields.NodeID, nodeID,
@@ -980,6 +984,38 @@ policy:
 	return ee.Error()
 }
 
+// DeleteXfrmPolicyOut will remove XFRM OUT policies by their node ID and destination subnet.
+func DeleteXfrmPolicyOut(log *slog.Logger, nodeID uint16, dst *net.IPNet) error {
+	if dst.IP.To4() != nil {
+		return deleteXfrmPolicyOutFamily(log, nodeID, dst, netlink.FAMILY_V4)
+	} else {
+		return deleteXfrmPolicyOutFamily(log, nodeID, dst, netlink.FAMILY_V6)
+	}
+}
+
+func deleteXfrmPolicyOutFamily(log *slog.Logger, nodeID uint16, dst *net.IPNet, family int) error {
+	xfrmPolicyList, err := safenetlink.XfrmPolicyList(family)
+	if err != nil {
+		log.Warn("Failed to list XFRM OUT policies for deletion", logfields.Error, err)
+		return fmt.Errorf("failed to list xfrm out policies: %w", err)
+	}
+	errs := resiliency.NewErrorSet("failed to delete xfrm out policies", len(xfrmPolicyList))
+	for _, p := range xfrmPolicyList {
+		if !matchesOnNodeID(p.Mark) || ipsec.GetNodeIDFromXfrmMark(p.Mark) != nodeID || !matchesOnDst(p.Dst, dst) {
+			continue
+		}
+		if err := netlink.XfrmPolicyDel(&p); err != nil {
+			errs.Add(fmt.Errorf("unable to delete xfrm out policy %s: %w", p.String(), err))
+		}
+	}
+	if err := errs.Error(); err != nil {
+		log.Warn("Failed to delete XFRM OUT policy", logfields.Error, err)
+		return err
+	}
+
+	return nil
+}
+
 func decodeIPSecKey(keyRaw string) (int, []byte, error) {
 	// As we have released the v1.4.0 docs telling the users to write the
 	// k8s secret with the prefix "0x" we have to remove it if it is present,
@@ -995,22 +1031,16 @@ func decodeIPSecKey(keyRaw string) (int, []byte, error) {
 // LoadIPSecKeysFile imports IPSec auth and crypt keys from a file. The format
 // is to put a key per line as follows, (auth-algo auth-key enc-algo enc-key)
 // Returns the authentication overhead in bytes, the key ID, and an error.
-func LoadIPSecKeysFile(log *slog.Logger, path string) (int, uint8, error) {
-	log.Info("Loading IPsec keyfile",
-		logfields.Path, path,
-		logfields.LogSubsys, subsystem,
-	)
-
+func LoadIPSecKeysFile(path string) (int, uint8, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer file.Close()
-	return LoadIPSecKeys(log, file)
+	return LoadIPSecKeys(file)
 }
 
-func LoadIPSecKeys(log *slog.Logger, r io.Reader) (int, uint8, error) {
-	log = log.With(logfields.LogSubsys, subsystem)
+func LoadIPSecKeys(r io.Reader) (int, uint8, error) {
 	var spi uint8
 	var keyLen int
 
@@ -1045,7 +1075,7 @@ func LoadIPSecKeys(log *slog.Logger, r io.Reader) (int, uint8, error) {
 			return 0, 0, fmt.Errorf("missing IPSec key or invalid format")
 		}
 
-		spi, offsetBase, err = parseSPI(log, s[offsetSPI])
+		spi, offsetBase, err = parseSPI(s[offsetSPI])
 		if err != nil {
 			return 0, 0, fmt.Errorf("failed to parse SPI: %w", err)
 		}
@@ -1121,7 +1151,7 @@ func LoadIPSecKeys(log *slog.Logger, r io.Reader) (int, uint8, error) {
 	return keyLen, spi, nil
 }
 
-func parseSPI(log *slog.Logger, spiStr string) (uint8, int, error) {
+func parseSPI(spiStr string) (uint8, int, error) {
 	if spiStr[len(spiStr)-1] == '+' {
 		spiStr = spiStr[:len(spiStr)-1]
 	}
@@ -1165,7 +1195,7 @@ func DeleteIPsecEncryptRoute(log *slog.Logger) {
 		for _, rt := range routes {
 			if err := netlink.RouteDel(&rt); err != nil {
 				log.Warn("Unable to delete ipsec encrypt route",
-					logfields.Route, rt.String(),
+					logfields.Route, rt,
 					logfields.Error, err,
 				)
 			}
@@ -1177,11 +1207,11 @@ func keyfileWatcher(log *slog.Logger, ctx context.Context, watcher *fswatcher.Wa
 	for {
 		select {
 		case event := <-watcher.Events:
-			if event.Op&(fsnotify.Create|fsnotify.Write) == 0 {
+			if event.Op&(fswatcher.Create|fswatcher.Write) == 0 {
 				continue
 			}
 
-			_, spi, err := LoadIPSecKeysFile(log, keyfilePath)
+			_, spi, err := LoadIPSecKeysFile(keyfilePath)
 			if err != nil {
 				health.Degraded(fmt.Sprintf("Failed to load keyfile %q", keyfilePath), err)
 				log.Error("Failed to load IPsec keyfile", logfields.Error, err)
@@ -1227,7 +1257,7 @@ func StartKeyfileWatcher(log *slog.Logger, group job.Group, keyfilePath string, 
 		return nil
 	}
 
-	watcher, err := fswatcher.New([]string{keyfilePath})
+	watcher, err := fswatcher.New(log, []string{keyfilePath})
 	if err != nil {
 		return err
 	}

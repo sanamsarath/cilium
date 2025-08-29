@@ -4,7 +4,6 @@
 package egressmap
 
 import (
-	"fmt"
 	"net/netip"
 	"testing"
 
@@ -17,14 +16,15 @@ import (
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-func TestPolicyMap(t *testing.T) {
+func TestPrivilegedPolicyMap(t *testing.T) {
 	testutils.PrivilegedTest(t)
 
-	bpf.CheckOrMountFS("")
+	logger := hivetest.Logger(t)
+	bpf.CheckOrMountFS(logger, "")
 	assert.NoError(t, rlimit.RemoveMemlock())
 
 	t.Run("IPv4 policies", func(t *testing.T) {
-		egressPolicyMap := createPolicyMap4(hivetest.Lifecycle(t), DefaultPolicyConfig, ebpf.PinNone)
+		egressPolicyMap := createPolicyMap4(hivetest.Lifecycle(t), nil, DefaultPolicyConfig, ebpf.PinNone)
 
 		sourceIP1 := netip.MustParseAddr("1.1.1.1")
 		sourceIP2 := netip.MustParseAddr("1.1.1.2")
@@ -67,8 +67,7 @@ func TestPolicyMap(t *testing.T) {
 	})
 
 	t.Run("IPv6 policies", func(t *testing.T) {
-		fmt.Print("HELLO")
-		egressPolicyMap := createPolicyMap6(hivetest.Lifecycle(t), DefaultPolicyConfig, ebpf.PinNone)
+		egressPolicyMap := createPolicyMap6(hivetest.Lifecycle(t), nil, DefaultPolicyConfig, ebpf.PinNone)
 
 		sourceIP1 := netip.MustParseAddr("2001:db8:1::1")
 		sourceIP2 := netip.MustParseAddr("2001:db8:1::2")

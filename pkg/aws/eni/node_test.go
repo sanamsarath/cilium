@@ -45,23 +45,6 @@ func TestGetMaximumAllocatableIPv4(t *testing.T) {
 	require.Equal(t, 0, n.GetMaximumAllocatableIPv4())
 }
 
-// TestGetUsedIPWithPrefixes tests the logic computing used IPs on a node when prefix delegation is enabled.
-func TestGetUsedIPWithPrefixes(t *testing.T) {
-	cn := newCiliumNode("node1", withInstanceType("m5a.large"))
-	n := &Node{k8sObj: cn}
-	eniName := "eni-1"
-	prefixes := []string{"10.10.128.0/28", "10.10.128.16/28"}
-	eniMap := make(map[string]types.ENI)
-	eniMap[eniName] = types.ENI{Prefixes: prefixes}
-	cn.Status.ENI.ENIs = eniMap
-
-	allocationMap := make(ipamTypes.AllocationMap)
-	allocationMap["10.10.128.2"] = ipamTypes.AllocationIP{Resource: eniName}
-	allocationMap["10.10.128.18"] = ipamTypes.AllocationIP{Resource: eniName}
-	n.k8sObj.Status.IPAM.Used = allocationMap
-	require.Equal(t, 32, n.GetUsedIPWithPrefixes())
-}
-
 func Test_findSubnetInSameRouteTableWithNodeSubnet(t *testing.T) {
 	routeTableMap := ipamTypes.RouteTableMap{
 		"rt-1": &ipamTypes.RouteTable{
@@ -188,6 +171,49 @@ func Test_checkSubnetInSameRouteTableWithNodeSubnet(t *testing.T) {
 			}
 			got := node.checkSubnetInSameRouteTableWithNodeSubnet(tt.subnet)
 			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsPrefixDelegated(t *testing.T) {
+	tests := []struct {
+		name            string
+		instanceType    string
+		expectDelegated bool
+	}{
+		{
+			name:            "xen instance",
+			instanceType:    "m4.large",
+			expectDelegated: false,
+		},
+		{
+			name:            "metal instance",
+			instanceType:    "m5.metal",
+			expectDelegated: true,
+		},
+		{
+			name:            "nitro instance",
+			instanceType:    "m5.large",
+			expectDelegated: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := ec2mock.NewAPI(nil, nil, nil, nil)
+			instances, err := NewInstancesManager(hivetest.Logger(t), api)
+			require.NoError(t, err)
+			n := &Node{
+				rootLogger: hivetest.Logger(t),
+				manager:    instances,
+				k8sObj:     newCiliumNode("node1", withInstanceType(tt.instanceType)),
+				node: &mockIPAMNode{
+					prefixDelegation: true,
+				},
+			}
+			n.logger.Store(n.rootLogger)
+
+			require.Equal(t, tt.expectDelegated, n.IsPrefixDelegated())
 		})
 	}
 }

@@ -65,8 +65,8 @@ func (lrp *LocalRedirectPolicy) getModel() *models.LRPSpec {
 
 	return &models.LRPSpec{
 		UID:              string(lrp.UID),
-		Name:             lrp.ID.Name,
-		Namespace:        lrp.ID.Namespace,
+		Name:             lrp.ID.Name(),
+		Namespace:        lrp.ID.Namespace(),
 		FrontendType:     feType,
 		LrpType:          lrpType,
 		ServiceID:        lrp.ServiceID.String(),
@@ -77,9 +77,9 @@ func (lrp *LocalRedirectPolicy) getModel() *models.LRPSpec {
 func (feM *feMapping) getModel() *models.FrontendMapping {
 	return &models.FrontendMapping{
 		FrontendAddress: &models.FrontendAddress{
-			IP:       feM.feAddr.AddrCluster.String(),
-			Protocol: feM.feAddr.Protocol,
-			Port:     feM.feAddr.Port,
+			IP:       feM.feAddr.AddrCluster().String(),
+			Protocol: feM.feAddr.Protocol(),
+			Port:     feM.feAddr.Port(),
 		},
 	}
 }

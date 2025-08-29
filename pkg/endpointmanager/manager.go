@@ -10,10 +10,13 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"runtime"
 	"sync"
 
 	"github.com/cilium/hive/cell"
 
+	"github.com/cilium/cilium/api/v1/models"
+	endpointapi "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/controller"
@@ -21,6 +24,7 @@ import (
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mcastmanager"
@@ -30,7 +34,6 @@ import (
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -106,13 +109,13 @@ type endpointManager struct {
 type endpointDeleteFunc func(*endpoint.Endpoint, endpoint.DeleteConfig) []error
 
 // New creates a new endpointManager.
-func New(logger *slog.Logger, epSynchronizer EndpointResourceSynchronizer, lns *node.LocalNodeStore, health cell.Health, monitorAgent monitoragent.Agent) *endpointManager {
+func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer EndpointResourceSynchronizer, lns *node.LocalNodeStore, health cell.Health, monitorAgent monitoragent.Agent, config EndpointManagerConfig) *endpointManager {
 	mgr := endpointManager{
 		logger:                       logger,
 		health:                       health,
 		endpoints:                    make(map[uint16]*endpoint.Endpoint),
 		endpointsAux:                 make(map[string]*endpoint.Endpoint),
-		mcastManager:                 mcastmanager.New(option.Config.IPv6MCastDevice),
+		mcastManager:                 mcastmanager.New(logger, option.Config.IPv6MCastDevice),
 		EndpointResourceSynchronizer: epSynchronizer,
 		subscribers:                  make(map[Subscriber]struct{}),
 		controllers:                  controller.NewManager(),
@@ -122,7 +125,7 @@ func New(logger *slog.Logger, epSynchronizer EndpointResourceSynchronizer, lns *
 		policyUpdateCallbackDetails:  newPolicyUpdateCallbackDetails(),
 	}
 	mgr.deleteEndpoint = mgr.removeEndpoint
-	mgr.policyMapPressure = newPolicyMapPressure(logger)
+	mgr.policyMapPressure = newPolicyMapPressure(logger, registry, config.BPFPolicyMapPressureMetricsThreshold)
 	return &mgr
 }
 
@@ -277,17 +280,6 @@ func (mgr *endpointManager) allocateID(currID uint16) (uint16, error) {
 	return newID, nil
 }
 
-func (mgr *endpointManager) removeIDLocked(currID uint16) {
-	delete(mgr.endpoints, currID)
-}
-
-// RemoveID removes the id from the endpoints map in the endpointManager.
-func (mgr *endpointManager) RemoveID(currID uint16) {
-	mgr.mutex.Lock()
-	defer mgr.mutex.Unlock()
-	mgr.removeIDLocked(currID)
-}
-
 // Lookup looks up the endpoint by prefix id
 func (mgr *endpointManager) Lookup(id string) (*endpoint.Endpoint, error) {
 	mgr.mutex.RLock()
@@ -422,12 +414,6 @@ func (mgr *endpointManager) GetEndpointsByContainerID(containerID string) []*end
 	return eps
 }
 
-// ReleaseID releases the ID of the specified endpoint from the endpointManager.
-// Returns an error if the ID cannot be released.
-func (mgr *endpointManager) ReleaseID(ep *endpoint.Endpoint) error {
-	return mgr.epIDAllocator.release(ep.ID)
-}
-
 // unexpose removes the endpoint from the endpointmanager, so subsequent
 // lookups will no longer find the endpoint.
 func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
@@ -440,13 +426,13 @@ func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 	defer mgr.mutex.Unlock()
 
 	// This must be done before the ID is released for the endpoint!
-	mgr.removeIDLocked(ep.ID)
+	delete(mgr.endpoints, ep.ID)
 	mgr.mcastManager.RemoveAddress(ep.IPv6)
 
 	// We haven't yet allocated the ID for a restoring endpoint, so no
 	// need to release it.
 	if previousState != endpoint.StateRestoring {
-		if err := mgr.ReleaseID(ep); err != nil {
+		if err := mgr.epIDAllocator.release(ep.ID); err != nil {
 			mgr.logger.Warn(
 				"Unable to release endpoint ID",
 				logfields.Error, err,
@@ -595,7 +581,7 @@ func (mgr *endpointManager) RegenerateAllEndpoints(regenMetadata *regeneration.E
 	eps := mgr.GetEndpoints()
 	wg.Add(len(eps))
 
-	mgr.logger.Info("regenerating all endpoints", logfields.Reason, regenMetadata.Reason)
+	mgr.logger.Debug("regenerating all endpoints", logfields.Reason, regenMetadata.Reason)
 	for _, ep := range eps {
 		go func(ep *endpoint.Endpoint) {
 			<-ep.RegenerateIfAlive(regenMetadata)
@@ -639,18 +625,6 @@ func (mgr *endpointManager) GetEndpoints() []*endpoint.Endpoint {
 	return eps
 }
 
-// GetPolicyEndpoints returns a map of all endpoints present in endpoint
-// manager as policy.Endpoint interface set for the map key.
-func (mgr *endpointManager) GetPolicyEndpoints() map[policy.Endpoint]struct{} {
-	mgr.mutex.RLock()
-	eps := make(map[policy.Endpoint]struct{}, len(mgr.endpoints))
-	for _, ep := range mgr.endpoints {
-		eps[ep] = struct{}{}
-	}
-	mgr.mutex.RUnlock()
-	return eps
-}
-
 func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 	newID, err := mgr.allocateID(ep.ID)
 	if err != nil {
@@ -671,6 +645,67 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 	mgr.RunK8sCiliumEndpointSync(ep, ep.GetReporter("cep-k8s-sync"))
 
 	return nil
+}
+
+func (mgr *endpointManager) GetEndpointList(params endpointapi.GetEndpointParams) []*models.Endpoint {
+	maxGoroutines := runtime.NumCPU()
+	var (
+		epWorkersWg, epsAppendWg sync.WaitGroup
+		convertedLabels          labels.Labels
+		resEPs                   []*models.Endpoint
+	)
+
+	if params.Labels != nil {
+		// Convert params.Labels to model that we can compare with the endpoint's labels.
+		convertedLabels = labels.NewLabelsFromModel(params.Labels)
+	}
+
+	eps := mgr.GetEndpoints()
+	if len(eps) < maxGoroutines {
+		maxGoroutines = len(eps)
+	}
+	epsCh := make(chan *endpoint.Endpoint, maxGoroutines)
+	epModelsCh := make(chan *models.Endpoint, maxGoroutines)
+
+	epWorkersWg.Add(maxGoroutines)
+	for range maxGoroutines {
+		// Run goroutines to process each endpoint and the corresponding model.
+		// The obtained endpoint model is sent to the endpoint models channel from
+		// where it will be aggregated later.
+		go func(wg *sync.WaitGroup, epModelsChan chan<- *models.Endpoint, epsChan <-chan *endpoint.Endpoint) {
+			for ep := range epsChan {
+				if ep.HasLabels(convertedLabels) {
+					epModelsChan <- ep.GetModel()
+				}
+			}
+			wg.Done()
+		}(&epWorkersWg, epModelsCh, epsCh)
+	}
+
+	// Send the endpoints to be aggregated a models to the endpoint channel.
+	go func(epsChan chan<- *endpoint.Endpoint, eps []*endpoint.Endpoint) {
+		for _, ep := range eps {
+			epsChan <- ep
+		}
+		close(epsChan)
+	}(epsCh, eps)
+
+	epsAppendWg.Add(1)
+	// This needs to be done over channels since we might not receive all
+	// the existing endpoints since not all endpoints contain the list of
+	// labels that we will use to filter in `ep.HasLabels(convertedLabels)`
+	go func(epsAppended *sync.WaitGroup) {
+		for ep := range epModelsCh {
+			resEPs = append(resEPs, ep)
+		}
+		epsAppended.Done()
+	}(&epsAppendWg)
+
+	epWorkersWg.Wait()
+	close(epModelsCh)
+	epsAppendWg.Wait()
+
+	return resEPs
 }
 
 // RestoreEndpoint exposes the specified endpoint to other subsystems via the
@@ -779,31 +814,9 @@ func (mgr *endpointManager) WaitForEndpointsAtPolicyRev(ctx context.Context, rev
 	return nil
 }
 
-// CallbackForEndpointsAtPolicyRev registers a callback on all endpoints that
-// exist when invoked. It is similar to WaitForEndpointsAtPolicyRevision but
-// each endpoint that reaches the desired revision calls 'done' independently.
-// The provided callback should not block and generally be lightweight.
-func (mgr *endpointManager) CallbackForEndpointsAtPolicyRev(ctx context.Context, rev uint64, done func(time.Time)) error {
-	eps := mgr.GetEndpoints()
-	for i := range eps {
-		eps[i].WaitForPolicyRevision(ctx, rev, done)
-	}
-	return nil
-}
-
 // EndpointExists returns whether the endpoint with id exists.
 func (mgr *endpointManager) EndpointExists(id uint16) bool {
 	return mgr.LookupCiliumID(id) != nil
-}
-
-// GetEndpointNetnsCookieByIP returns the netns cookie for the passed endpoint with ip address if found.
-func (mgr *endpointManager) GetEndpointNetnsCookieByIP(ip netip.Addr) (uint64, error) {
-	ep := mgr.LookupIP(ip)
-	if ep == nil {
-		return 0, fmt.Errorf("endpoint not found by ip %v", ip)
-	}
-
-	return ep.NetNsCookie, nil
 }
 
 // UpdatePolicy triggers policy updates for all live endpoints.

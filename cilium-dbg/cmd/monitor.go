@@ -19,8 +19,11 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/datapath/link"
 	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/monitor"
 	"github.com/cilium/cilium/pkg/monitor/agent/listener"
+	"github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/monitor/format"
 	"github.com/cilium/cilium/pkg/monitor/payload"
 	"github.com/cilium/cilium/pkg/time"
@@ -51,7 +54,7 @@ programs attached to endpoints and devices. This includes:
 		},
 	}
 	linkCache  = link.NewLinkCache()
-	printer    = format.NewMonitorFormatter(format.INFO, linkCache)
+	printer    = format.NewMonitorFormatter(api.INFO, linkCache, os.Stdout)
 	socketPath = ""
 	verbosity  = []bool{}
 )
@@ -74,15 +77,15 @@ func init() {
 
 func setVerbosity() {
 	if printer.JSONOutput {
-		printer.Verbosity = format.JSON
+		printer.Verbosity = api.JSON
 	} else {
 		switch len(verbosity) {
 		case 1:
-			printer.Verbosity = format.DEBUG
+			printer.Verbosity = api.DEBUG
 		case 2:
-			printer.Verbosity = format.VERBOSE
+			printer.Verbosity = api.VERBOSE
 		default:
-			printer.Verbosity = format.INFO
+			printer.Verbosity = api.INFO
 		}
 	}
 }
@@ -140,8 +143,10 @@ func consumeMonitorEvents(ctx context.Context, conn net.Conn, version listener.V
 			// earlier code used an else to handle this case, along with pl.Type ==
 			// payload.RecordLost above. It should be safe to call lostEvent to match
 			// the earlier behaviour, despite it not being wholly correct.
-			log.WithError(err).WithField("type", pl.Type).Warn("Unknown payload type")
-			format.LostEvent(pl.Lost, pl.CPU)
+			log.Warn("Unknown payload type",
+				logfields.Error, err,
+				logfields.Type, pl.Type,
+			)
 		}
 	}
 }
@@ -246,17 +251,17 @@ func runMonitor(ctx context.Context) {
 	for ; ; time.Sleep(connTimeout) {
 		conn, version, err := openMonitorSock(vp.GetString("monitor-socket"))
 		if err != nil {
-			log.WithError(err).Error("Cannot open monitor socket")
+			log.Error("Cannot open monitor socket", logfields.Error, err)
 			return
 		}
 
 		if err := consumeMonitorEvents(ctx, conn, version); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				log.WithError(err).Warn("connection closed")
+				log.Warn("connection closed", logfields.Error, err)
 				continue
 			}
 
-			log.WithError(err).Fatal("decoding error")
+			logging.Fatal(log, "decoding error", logfields.Error, err)
 		}
 
 		return

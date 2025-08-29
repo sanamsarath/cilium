@@ -66,7 +66,7 @@ func agentCRDResourceNames() []string {
 		result = append(result, CRDResourceName(v2.CCGName))
 	}
 
-	if option.Config.EnableIPv4EgressGateway {
+	if option.Config.EnableEgressGateway {
 		result = append(result, CRDResourceName(v2.CEGPName))
 	}
 	if option.Config.EnableLocalRedirectPolicy {
@@ -87,7 +87,7 @@ func agentCRDResourceNames() []string {
 	}
 
 	result = append(result,
-		CRDResourceName(v2alpha1.LBIPPoolName),
+		CRDResourceName(v2.LBIPPoolName),
 		CRDResourceName(v2alpha1.L2AnnouncementName),
 	)
 
@@ -126,7 +126,6 @@ func AllCiliumCRDResourceNames() []string {
 	res := append(AgentCRDResourceNames(), GatewayAPIResourceNames()...)
 	res = append(res,
 		CRDResourceName(v2.CNCName),
-		CRDResourceName(v2alpha1.CNCName), // TODO depreciate CNC on v2alpha1 https://github.com/cilium/cilium/issues/31982
 	)
 	return res
 }

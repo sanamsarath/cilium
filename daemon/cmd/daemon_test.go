@@ -17,16 +17,19 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/api/v1/server"
 	cnicell "github.com/cilium/cilium/daemon/cmd/cni"
 	fakecni "github.com/cilium/cilium/daemon/cmd/cni/fake"
 	"github.com/cilium/cilium/pkg/controller"
 	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
+	"github.com/cilium/cilium/pkg/datapath/neighbor"
 	"github.com/cilium/cilium/pkg/datapath/prefilter"
+	"github.com/cilium/cilium/pkg/dial"
+	endpointapi "github.com/cilium/cilium/pkg/endpoint/api"
 	"github.com/cilium/cilium/pkg/envoy"
-	"github.com/cilium/cilium/pkg/fqdn/defaultdns"
-	fqdnproxy "github.com/cilium/cilium/pkg/fqdn/proxy"
 	"github.com/cilium/cilium/pkg/hive"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sFakeClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
@@ -56,9 +59,9 @@ type DaemonSuite struct {
 	// as returned by policy.GetPolicyEnabled().
 	oldPolicyEnabled string
 
-	PolicyImporter policycell.PolicyImporter
-	envoyXdsServer envoy.XDSServer
-	dnsProxy       defaultdns.Proxy
+	PolicyImporter     policycell.PolicyImporter
+	envoyXdsServer     envoy.XDSServer
+	endpointAPIManager endpointapi.EndpointAPIManager
 }
 
 func setupTestDirectories() string {
@@ -93,8 +96,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func setupDaemonSuite(tb testing.TB) *DaemonSuite {
+func setupDaemonEtcdSuite(tb testing.TB) *DaemonSuite {
 	testutils.IntegrationTest(tb)
+
+	client := kvstore.SetupDummy(tb, kvstore.EtcdBackendName)
 
 	ds := &DaemonSuite{
 		log: hivetest.Logger(tb),
@@ -108,10 +113,12 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 	ds.hive = hive.New(
 		cell.Provide(
 			func(log *slog.Logger) k8sClient.Clientset {
-				cs, _ := k8sClient.NewFakeClientset(log)
+				cs, _ := k8sFakeClient.NewFakeClientset(log)
 				cs.Disable()
 				return cs
 			},
+			func() kvstore.Config { return kvstore.Config{KVStore: kvstore.EtcdBackendName} },
+			func() kvstore.Client { return client },
 			func() *option.DaemonConfig { return option.Config },
 			func() cnicell.CNIConfigManager { return &fakecni.FakeCNIConfigManager{} },
 			func() ctmap.GCRunner { return ctmap.NewFakeGCRunner() },
@@ -120,14 +127,17 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 			func() *loadbalancer.TestConfig {
 				return &loadbalancer.TestConfig{}
 			},
+			func() *server.Server { return nil },
 		),
 		fakeDatapath.Cell,
+		neighbor.ForwardableIPCell,
+		cell.Provide(neighbor.NewCommonTestConfig(true, false)),
 		prefilter.Cell,
 		monitorAgent.Cell,
+		dial.ServiceResolverCell,
 		ControlPlane,
 		metrics.Cell,
 		store.Cell,
-		defaultdns.Cell,
 		cell.Invoke(func(p promise.Promise[*Daemon]) {
 			daemonPromise = p
 		}),
@@ -137,8 +147,8 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 		cell.Invoke(func(envoyXdsServer envoy.XDSServer) {
 			ds.envoyXdsServer = envoyXdsServer
 		}),
-		cell.Invoke(func(dnsProxy defaultdns.Proxy) {
-			ds.dnsProxy = dnsProxy
+		cell.Invoke(func(endpointAPIManager endpointapi.EndpointAPIManager) {
+			ds.endpointAPIManager = endpointAPIManager
 		}),
 	)
 
@@ -156,9 +166,13 @@ func setupDaemonSuite(tb testing.TB) *DaemonSuite {
 	ds.d, err = daemonPromise.Await(ctx)
 	require.NoError(tb, err)
 
-	ds.dnsProxy.Set(fqdnproxy.MockFQDNProxy{})
-
 	ds.d.policy.GetSelectorCache().SetLocalIdentityNotifier(testidentity.NewDummyIdentityNotifier())
+
+	// Ensure that the identity allocator is synchronized before starting the
+	// actual tests, to prevent flakes caused by the goroutine started by
+	// [(*CachingIdentityAllocator).InitIdentityAllocator] still lingering
+	// around when the Hive gets stopped.
+	ds.d.identityAllocator.WaitForInitialGlobalIdentities(tb.Context())
 
 	// Reset the most common endpoint states before each test.
 	for _, s := range []string{
@@ -195,8 +209,8 @@ func (ds *DaemonSuite) setupConfigOptions() {
 	// run.
 	mockCmd := &cobra.Command{}
 	ds.hive.RegisterFlags(mockCmd.Flags())
-	InitGlobalFlags(mockCmd, ds.hive.Viper())
-	option.Config.Populate(ds.hive.Viper())
+	InitGlobalFlags(ds.log, mockCmd, ds.hive.Viper())
+	option.Config.Populate(ds.log, ds.hive.Viper())
 	option.Config.IdentityAllocationMode = option.IdentityAllocationModeKVstore
 	option.Config.DryMode = true
 	option.Config.Opts = option.NewIntOptions(&option.DaemonMutableOptionLibrary)
@@ -208,25 +222,6 @@ func (ds *DaemonSuite) setupConfigOptions() {
 	option.Config.Opts.SetBool(option.DropNotify, true)
 	option.Config.Opts.SetBool(option.TraceNotify, true)
 	option.Config.Opts.SetBool(option.PolicyVerdictNotify, true)
-
-	// Disable the replacement, as its initialization function execs bpftool
-	// which requires root privileges. This would require marking the test suite
-	// as privileged.
-	option.Config.KubeProxyReplacement = option.KubeProxyReplacementFalse
-}
-
-type DaemonEtcdSuite struct {
-	DaemonSuite
-}
-
-func setupDaemonEtcdSuite(tb testing.TB) *DaemonEtcdSuite {
-	testutils.IntegrationTest(tb)
-	kvstore.SetupDummy(tb, "etcd")
-
-	ds := setupDaemonSuite(tb)
-	return &DaemonEtcdSuite{
-		DaemonSuite: *ds,
-	}
 }
 
 // convenience wrapper that adds a single policy
@@ -242,10 +237,4 @@ func (ds *DaemonSuite) updatePolicy(upd *policyTypes.PolicyUpdate) {
 	upd.DoneChan = dc
 	ds.PolicyImporter.UpdatePolicy(upd)
 	<-dc
-}
-
-func TestMemoryMap(t *testing.T) {
-	pid := os.Getpid()
-	m := memoryMap(pid)
-	require.NotEmpty(t, m)
 }

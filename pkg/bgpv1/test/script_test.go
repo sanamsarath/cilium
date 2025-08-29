@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/hive/hivetest"
 	"github.com/cilium/hive/script"
 	"github.com/cilium/hive/script/scripttest"
+	"github.com/cilium/statedb"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,11 +25,15 @@ import (
 	daemonk8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/bgpv1"
 	"github.com/cilium/cilium/pkg/bgpv1/agent"
+	"github.com/cilium/cilium/pkg/bgpv1/manager"
 	"github.com/cilium/cilium/pkg/bgpv1/test/commands"
-	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
+	"github.com/cilium/cilium/pkg/datapath/tables"
+	envoyCfg "github.com/cilium/cilium/pkg/envoy/config"
+
 	ciliumhive "github.com/cilium/cilium/pkg/hive"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
-	"github.com/cilium/cilium/pkg/k8s/client"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
@@ -49,7 +54,7 @@ const (
 	probeTCPMD5Flag    = "probe-tcp-md5"
 )
 
-func TestScript(t *testing.T) {
+func TestPrivilegedScript(t *testing.T) {
 	testutils.PrivilegedTest(t)
 	slog.SetLogLoggerLevel(slog.LevelDebug) // used by test GoBGP instances
 
@@ -84,17 +89,27 @@ func TestScript(t *testing.T) {
 		}
 
 		h := ciliumhive.New(
-			client.FakeClientCell,
+			k8sClient.FakeClientCell(),
 			daemonk8s.ResourcesCell,
+			cell.Config(envoyCfg.SecretSyncConfig{}),
+
 			metrics.Cell,
 			bgpv1.Cell,
+
+			// Provide route and device tables
+			cell.Provide(
+				tables.NewRouteTable,
+				tables.NewDeviceTable,
+				statedb.RWTable[*tables.Route].ToTable,  // Table[*Route]
+				statedb.RWTable[*tables.Device].ToTable, // Table[*Device]
+			),
 
 			cell.Provide(func() *option.DaemonConfig {
 				// BGP Manager uses the global variable option.Config so we need to set it there as well
 				option.Config = &option.DaemonConfig{
 					EnableBGPControlPlane:     true,
 					BGPSecretsNamespace:       testSecretsNamespace,
-					BGPRouterIDAllocationMode: defaults.BGPRouterIDAllocationMode,
+					BGPRouterIDAllocationMode: option.BGPRouterIDAllocationModeDefault,
 					IPAM:                      *ipam,
 				}
 				return option.Config
@@ -105,6 +120,7 @@ func TestScript(t *testing.T) {
 			}),
 			cell.Invoke(func(m agent.BGPRouterManager) {
 				bgpMgr = m
+				m.(*manager.BGPRouterManager).DestroyRouterOnStop(true) // fully destroy GoBGP server on Stop()
 			}),
 		)
 
@@ -114,7 +130,7 @@ func TestScript(t *testing.T) {
 		})
 
 		// setup test peering IPs
-		l, err := netlink.LinkByName(testLinkName)
+		l, err := safenetlink.LinkByName(testLinkName)
 		require.NoError(t, err)
 		for _, ip := range *peeringIPs {
 			ipAddr, err := netip.ParseAddr(ip)

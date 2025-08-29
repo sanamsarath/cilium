@@ -1,9 +1,10 @@
-# syntax=docker/dockerfile:1.15@sha256:05e0ad437efefcf144bfbf9d7f728c17818408e6d01432d9e264ef958bbd52f3
+# check=error=true
 
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG GOLANG_IMAGE=docker.io/library/golang:1.24.2@sha256:d9db32125db0c3a680cfb7a1afcaefb89c898a075ec148fdc2f0f646cc2ed509
+ARG BASE_IMAGE=gcr.io/distroless/static:latest@sha256:2e114d20aa6371fd271f854aa3d6b2b7d2e70e797bb3ea44fb677afec60db22c
+ARG GOLANG_IMAGE=docker.io/library/golang:1.25.0@sha256:5502b0e56fca23feba76dbc5387ba59c593c02ccc2f0f7355871ea9a0852cebe
 # BUILDPLATFORM is an automatic platform ARG enabled by Docker BuildKit.
 # Represents the plataform where the build is happening, do not mix with
 # TARGETARCH
@@ -13,6 +14,8 @@ FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} AS builder
 ARG TARGETOS
 # TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.
 ARG TARGETARCH
+# MODIFIERS are extra arguments to be passed to make at build time.
+ARG MODIFIERS
 
 WORKDIR /go/src/github.com/cilium/cilium
 
@@ -22,7 +25,7 @@ RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium \
     make GOARCH=${TARGETARCH} DESTDIR=/out/${TARGETOS}/${TARGETARCH} $(echo $MODIFIERS | tr -d '"') \
     -C cilium-cli install
 
-FROM gcr.io/distroless/static:latest@sha256:3d0f463de06b7ddff27684ec3bfd0b54a425149d0f8685308b1fdf297b0265e9 AS release
+FROM ${BASE_IMAGE} AS release
 # TARGETOS is an automatic platform ARG enabled by Docker BuildKit.
 ARG TARGETOS
 # TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.

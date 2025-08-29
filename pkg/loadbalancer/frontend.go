@@ -15,6 +15,8 @@ import (
 	"github.com/cilium/statedb/reconciler"
 	"k8s.io/apimachinery/pkg/util/duration"
 
+	"github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -53,6 +55,9 @@ type Frontend struct {
 
 	// Backends associated with the frontend.
 	Backends BackendsSeq2
+
+	// HealthCheckBackends associated with the frontend that includes the ones that should be health checked.
+	HealthCheckBackends BackendsSeq2
 
 	// ID is the identifier allocated to this frontend. Used as the key
 	// in the services BPF map. This field is populated by the reconciler
@@ -115,9 +120,72 @@ func (fe *Frontend) TableRow() []string {
 		string(fe.PortName),
 		showBackends(fe.Backends),
 		redirectTo,
-		string(fe.Status.Kind),
+		fe.Status.Kind.String(),
 		duration.HumanDuration(time.Since(fe.Status.UpdatedAt)),
-		fe.Status.Error,
+		fe.Status.GetError(),
+	}
+}
+
+func (fe *Frontend) ToModel() *models.Service {
+	var natPolicy string
+
+	svc := fe.Service
+
+	id := int64(fe.ID)
+	if svc.NatPolicy != SVCNatPolicyNone {
+		natPolicy = string(svc.NatPolicy)
+	}
+	spec := &models.ServiceSpec{
+		ID:              id,
+		FrontendAddress: fe.Address.GetModel(),
+		Flags: &models.ServiceSpecFlags{
+			Type:                string(fe.Type),
+			TrafficPolicy:       string(svc.ExtTrafficPolicy),
+			ExtTrafficPolicy:    string(svc.ExtTrafficPolicy),
+			IntTrafficPolicy:    string(svc.IntTrafficPolicy),
+			NatPolicy:           natPolicy,
+			HealthCheckNodePort: svc.HealthCheckNodePort,
+			Name:                svc.Name.Name(),
+			Namespace:           svc.Name.Namespace(),
+		},
+	}
+
+	if fe.RedirectTo != nil {
+		spec.Flags.Type = string(SVCTypeLocalRedirect)
+	}
+
+	if svc.Name.Cluster() != option.Config.ClusterName {
+		spec.Flags.Cluster = svc.Name.Cluster()
+	}
+
+	backendModel := func(be BackendParams) *models.BackendAddress {
+		addrClusterStr := be.Address.AddrCluster().String()
+		state := be.State
+		if be.Unhealthy {
+			state = BackendStateQuarantined
+		}
+		stateStr, _ := state.String()
+		return &models.BackendAddress{
+			IP:        &addrClusterStr,
+			Protocol:  be.Address.Protocol(),
+			Port:      be.Address.Port(),
+			NodeName:  be.NodeName,
+			Zone:      be.GetZone(),
+			State:     stateStr,
+			Preferred: true,
+			Weight:    &be.Weight,
+		}
+	}
+
+	for be := range fe.Backends {
+		spec.BackendAddresses = append(spec.BackendAddresses, backendModel(be))
+	}
+
+	return &models.Service{
+		Spec: spec,
+		Status: &models.ServiceStatus{
+			Realized: spec,
+		},
 	}
 }
 
@@ -161,9 +229,9 @@ var (
 	frontendServiceIndex = statedb.Index[*Frontend, ServiceName]{
 		Name: "service",
 		FromObject: func(fe *Frontend) index.KeySet {
-			return index.NewKeySet(index.Stringer(fe.ServiceName))
+			return index.NewKeySet(fe.ServiceName.Key())
 		},
-		FromKey:    index.Stringer[ServiceName],
+		FromKey:    ServiceName.Key,
 		FromString: index.FromString,
 		Unique:     false,
 	}
@@ -176,13 +244,10 @@ const (
 )
 
 func NewFrontendsTable(cfg Config, db *statedb.DB) (statedb.RWTable[*Frontend], error) {
-	tbl, err := statedb.NewTable(
+	return statedb.NewTable(
+		db,
 		FrontendTableName,
 		frontendAddressIndex,
 		frontendServiceIndex,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return tbl, db.RegisterTable(tbl)
 }

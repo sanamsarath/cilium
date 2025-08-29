@@ -10,7 +10,6 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
-	"go.uber.org/goleak"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -21,16 +20,19 @@ import (
 	"github.com/cilium/cilium/pkg/hive"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	k8sFakeClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
+	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/testutils"
 )
 
 func TestIdentitiesGC(t *testing.T) {
-	defer goleak.VerifyNone(
+	defer testutils.GoleakVerifyNone(
 		t,
 		// To ignore goroutine started from sigs.k8s.io/controller-runtime/pkg/log.go
 		// init function
-		goleak.IgnoreTopFunction("time.Sleep"),
+		testutils.GoleakIgnoreTopFunction("time.Sleep"),
 	)
 
 	var clientset k8sClient.Clientset
@@ -41,7 +43,9 @@ func TestIdentitiesGC(t *testing.T) {
 		metrics.Metric(NewMetrics),
 
 		// provide a fake clientset
-		k8sClient.FakeClientCell,
+		k8sFakeClient.FakeClientCell(),
+		// Provide a (disabled) kvstore client
+		kvstore.Cell(kvstore.DisabledBackendName),
 		// provide a fake spire client
 		spire.FakeCellClient,
 		// provide resources

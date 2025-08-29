@@ -36,6 +36,19 @@ var (
 // Requirements is AND of all requirements.
 type Requirements []Requirement
 
+func (r Requirements) String() string {
+	var sb strings.Builder
+
+	for i, requirement := range r {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(requirement.String())
+	}
+
+	return sb.String()
+}
+
 // Selector represents a label selector.
 type Selector interface {
 	// Matches returns true if this selector matches the given set of labels.
@@ -268,6 +281,13 @@ func (r *Requirement) Values() sets.Set[string] {
 	for i := range r.strValues {
 		ret.Insert(r.strValues[i])
 	}
+	return ret
+}
+
+// ValuesUnsorted returns a copy of requirement values as passed to NewRequirement without sorting.
+func (r *Requirement) ValuesUnsorted() []string {
+	ret := make([]string, 0, len(r.strValues))
+	ret = append(ret, r.strValues...)
 	return ret
 }
 
